@@ -1,0 +1,8 @@
+lancedb>=0.4.0
+open-clip-torch>=2.24.0
+torch>=2.0.0
+torchvision>=0.15.0
+Pillow>=10.0.0
+tqdm>=4.65.0
+pyarrow>=14.0.0
+numpy>=1.24.0
