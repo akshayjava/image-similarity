@@ -116,6 +116,7 @@ streamlit run app.py
 ![GUI Search](gui_search.png)
 ![GUI Benchmarks](gui_benchmarks.png)
 ![GUI Progress](gui_progress.png)
+![GUI Results](gui_results.png)
 
 ### Run benchmarks
 

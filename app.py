@@ -15,11 +15,12 @@ from PIL import Image
 from similarity_engine import SimilarityEngine, DEFAULT_TABLE_NAME
 from datasets import download_dataset, AVAILABLE_DATASETS, list_datasets
 from benchmarks.bench_datasets import benchmark_dataset
+import db_config
 
 # Page configuration
 st.set_page_config(
     page_title="Image Semantic Search",
-    page_icon="🔍",
+    page_icon="\U0001f50d",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -32,6 +33,188 @@ if "engine" not in st.session_state:
 def get_engine(db_path: str):
     """Cached engine initialization to avoid reloading model on every rerun."""
     return SimilarityEngine(db_path=db_path)
+
+def render_manage_page():
+    """Render the Database Management page."""
+    st.header("🗄️ Database Management")
+    
+    config = db_config.load_config()
+    databases = config.get("databases", {})
+    
+    # --- Check DBs ---
+    st.subheader("Registered Databases")
+    if not databases:
+        st.warning("No databases configured.")
+    else:
+        # Create a dataframe for display
+        db_list = []
+        for name, path in databases.items():
+            db_list.append({"Name": name, "Path": path})
+            
+        st.dataframe(pd.DataFrame(db_list), use_container_width=True, hide_index=True)
+        
+        # Removal UI
+        st.caption("Remove a database from configuration:")
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            to_remove = st.selectbox("Select to remove", list(databases.keys()), key="remove_select")
+        with col2:
+            if st.button("Remove", type="primary"):
+                if to_remove == "Default":
+                    st.error("Cannot remove Default database.")
+                else:
+                    db_config.remove_database(to_remove)
+                    st.success(f"Removed '{to_remove}'")
+                    st.rerun()
+
+    st.divider()
+    
+    tab1, tab2 = st.tabs(["Add Existing", "Create New (Ingest)"])
+    
+    with tab1:
+        st.subheader("Add Existing Database")
+        ae_name = st.text_input("Name", placeholder="e.g., MyVacationPhotos")
+        ae_path = st.text_input("Path to LanceDB", placeholder="/path/to/lancedb")
+        
+        if st.button("Add Existing"):
+            if ae_name and ae_path:
+                if os.path.exists(ae_path):
+                    db_config.add_database(ae_name, ae_path)
+                    st.success(f"Added '{ae_name}'")
+                    st.rerun()
+                else:
+                    st.error("Path does not exist.")
+            else:
+                st.error("Name and Path are required.")
+                
+    with tab2:
+        st.subheader("Create New Database (Ingest)")
+        cn_name = st.text_input("New DB Name", placeholder="e.g., CIFAR10_DB")
+        cn_source = st.text_input("Source Image Directory", placeholder="/path/to/images")
+        
+        # Optional: Custom DB path? Or just use ./lancedb_{name}?
+        # Let's let user specify location or default to ./dbs/{name}
+        # For simplicity, let's use a standard location: `projects/image-similarity/dbs/{name}`
+        # Or let user specify destination?
+        # User request: "create and manage databases based on directory indexed"
+        # Implies we create the DB.
+        
+        cn_dest = st.text_input("Destination DB Path (Optional)", placeholder="Leave empty to use ./dbs/<name>")
+        
+        if st.button("Ingest & Create"):
+            if cn_name and cn_source:
+                if not os.path.exists(cn_source):
+                    st.error("Source directory not found.")
+                else:
+                    target_db_path = cn_dest if cn_dest else f"./dbs/{cn_name}"
+                    
+                    # Create directory if needed
+                    os.makedirs(target_db_path, exist_ok=True)
+                    
+                    status_text = st.empty()
+                    progress_bar = st.progress(0)
+                    
+                    try:
+                        status_text.text("Initializing engine...")
+                        # Use a temporary engine to ingest
+                        ingest_engine = SimilarityEngine(db_path=target_db_path)
+                        
+                        # Ingest
+                        status_text.text(f"Ingesting from {cn_source}...")
+                        
+                        # We need a progress callback for ingestion too if we want it smooth,
+                        # but SimilarityEngine.index doesn't support it yet?
+                        # Wait, index() uses tqdm. Streamlit can't capture tqdm easily.
+                        # Unless we modify SimilarityEngine.index to take a callback?
+                        # For now, just run it. It returns stats.
+                        
+                        with st.spinner("Ingesting images... This may take a while."):
+                            stats = ingest_engine.index(cn_source)
+                            
+                        st.success(f"Ingestion complete! {stats['total_indexed']} images indexed.")
+                        
+                        # Register
+                        db_config.add_database(cn_name, target_db_path)
+                        st.success(f"Database '{cn_name}' registered successfully.")
+                        time.sleep(1)
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Ingestion failed: {e}")
+            else:
+                st.error("Name and Source Directory are required.")
+
+
+def main():
+    st.title("🔍 Local Image Semantic Search")
+
+    # --- Sidebar Configuration ---
+    st.sidebar.header("Navigation")
+    page = st.sidebar.radio("Go to", ["Search", "Benchmarks", "Manage Databases"])
+    
+    st.sidebar.divider()
+    st.sidebar.header("Configuration")
+    
+    # Load config
+    config = db_config.load_config()
+    databases = config.get("databases", {"Default": "./lancedb"})
+    
+    # DB Selection
+    db_names = list(databases.keys())
+    # Try to preserve selection or default
+    index = 0
+    if "active_db" in st.session_state:
+        if st.session_state["active_db"] in db_names:
+            index = db_names.index(st.session_state["active_db"])
+            
+    selected_db_name = st.sidebar.selectbox("Active Database", db_names, index=index)
+    st.session_state["active_db"] = selected_db_name
+    
+    db_path = databases[selected_db_name]
+    
+    # Load Engine
+    try:
+        engine = get_engine(db_path)
+        if page == "Search":
+            st.sidebar.success(f"Connected to {selected_db_name}")
+            st.sidebar.caption(f"`{db_path}`")
+    except Exception as e:
+        st.sidebar.error(f"Failed to load DB: {e}")
+        # Don't stop here, user might want to go to Manage page to fix it
+        if page == "Search":
+            st.stop()
+
+    # Table Selection (if multiple tables supported in future)
+    table_name = DEFAULT_TABLE_NAME
+
+    # Show Stats
+    if page == "Search" and st.sidebar.checkbox("Show DB Stats"):
+        try:
+            stats = engine.table_stats(table_name)
+            st.sidebar.json(stats)
+        except Exception:
+            st.sidebar.warning("Table not found or empty.")
+
+    st.sidebar.divider()
+    
+    # --- Page Routing ---
+    if page == "Search":
+        top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=50, value=12)
+        render_search_page(engine, top_k)
+    elif page == "Benchmarks":
+        render_benchmarks_page()
+    elif page == "Manage Databases":
+        render_manage_page()
+
+    if page != "Manage Databases":
+        st.sidebar.divider()
+        st.sidebar.markdown("### About")
+        st.sidebar.info(
+            "Privacy-focused, local image similarity search using CLIP + LanceDB.\n"
+            "No data leaves your machine."
+        )
+
+
 
 def render_search_page(engine, top_k):
     """Render the Search page."""
@@ -252,55 +435,7 @@ def render_benchmarks_page():
             st.warning("Please select at least one dataset.")
 
 
-def main():
-    st.title("🔍 Local Image Semantic Search")
 
-    # --- Sidebar Configuration ---
-    st.sidebar.header("Navigation")
-    page = st.sidebar.radio("Go to", ["Search", "Benchmarks"])
-    
-    st.sidebar.divider()
-    st.sidebar.header("Configuration")
-    
-    # DB Path Selection
-    default_db = "./lancedb"
-    db_path = st.sidebar.text_input("Database Path", value=default_db)
-    
-    # Load Engine
-    try:
-        engine = get_engine(db_path)
-        if page == "Search":
-            st.sidebar.success(f"Connected to {db_path}")
-    except Exception as e:
-        st.sidebar.error(f"Failed to load DB: {e}")
-        st.stop()
-
-    # Table Selection (if multiple tables supported in future)
-    table_name = DEFAULT_TABLE_NAME
-
-    # Show Stats
-    if page == "Search" and st.sidebar.checkbox("Show DB Stats"):
-        try:
-            stats = engine.table_stats(table_name)
-            st.sidebar.json(stats)
-        except Exception:
-            st.sidebar.warning("Table not found or empty.")
-
-    st.sidebar.divider()
-    
-    # --- Page Routing ---
-    if page == "Search":
-        top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=50, value=12)
-        render_search_page(engine, top_k)
-    elif page == "Benchmarks":
-        render_benchmarks_page()
-
-    st.sidebar.divider()
-    st.sidebar.markdown("### About")
-    st.sidebar.info(
-        "Privacy-focused, local image similarity search using CLIP + LanceDB.\n"
-        "No data leaves your machine."
-    )
 
 if __name__ == "__main__":
     main()
