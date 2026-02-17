@@ -155,7 +155,8 @@ def render_manage_page():
             else:
                 import sys, io
                 target_db_path = f"./dbs/{ds_db_name}"
-                data_dir = tempfile.mkdtemp(prefix="ds_download_")
+                data_dir = os.path.join("./data", ds_db_name)
+                os.makedirs(data_dir, exist_ok=True)
                 
                 console_box = st.empty()
                 progress_bar = st.progress(0)
@@ -204,13 +205,38 @@ def render_manage_page():
                 finally:
                     sys.stdout = old_out
                     sys.stderr = old_err
-                    shutil.rmtree(data_dir, ignore_errors=True)
                 
                 db_config.add_database(ds_db_name, target_db_path)
                 st.success(f"✅ Database '{ds_db_name}' created with {stats['total_indexed']:,} images!")
                 st.info("Switch to this database in the sidebar to search it.")
                 time.sleep(1)
                 st.rerun()
+
+
+def _show_db_preview(engine, label="Database Preview", n=8):
+    """Show a compact row of sample images from the current database."""
+    try:
+        table = engine.db.open_table(DEFAULT_TABLE_NAME)
+        count = table.count_rows()
+        if count == 0:
+            return
+        import random
+        # Sample random indices
+        sample_n = min(n, count)
+        df = table.to_pandas()
+        sample = df.sample(n=sample_n, random_state=random.randint(0, 9999))
+        paths = sample["id"].tolist()
+        valid = [p for p in paths if os.path.exists(p)]
+        if not valid:
+            return
+        with st.expander(f"🖼️ {label} ({count:,} images)", expanded=False):
+            cols = st.columns(min(len(valid), 8))
+            for j, path in enumerate(valid[:8]):
+                with cols[j]:
+                    st.image(Image.open(path), use_column_width=True)
+                    st.caption(f"`{Path(path).name}`")
+    except Exception:
+        pass
 
 
 def render_tools_page(engine):
@@ -225,6 +251,7 @@ def render_tools_page(engine):
     with tab_dup:
         st.subheader("Find Near-Duplicate Images")
         st.caption("Scan your database for image pairs with very similar CLIP embeddings.")
+        _show_db_preview(engine, "Sample Images from Database")
 
         col1, col2 = st.columns([1, 3])
         with col1:
@@ -275,6 +302,7 @@ def render_tools_page(engine):
     with tab_clust:
         st.subheader("Image Clustering (K-Means)")
         st.caption("Group similar images into clusters based on their CLIP embeddings.")
+        _show_db_preview(engine, "Sample Images to Cluster")
 
         col1, col2 = st.columns([1, 3])
         with col1:
@@ -328,6 +356,7 @@ def render_tools_page(engine):
     with tab_explore:
         st.subheader("Embedding Space Explorer")
         st.caption("Visualize your image database as a 2D scatter plot using t-SNE or UMAP.")
+        _show_db_preview(engine, "Sample Images to Visualize")
 
         col1, col2 = st.columns([1, 3])
         with col1:
@@ -562,11 +591,13 @@ def render_benchmarks_page():
             console_box = st.empty()     # live CLI output
             
             # Create directories — persistent if save_db is checked
-            data_dir = tempfile.mkdtemp(prefix="bench_data_gui_")
             if save_db:
+                data_dir = os.path.join("./data", "benchmarks")
                 db_dir = os.path.join("./dbs", "benchmarks")
+                os.makedirs(data_dir, exist_ok=True)
                 os.makedirs(db_dir, exist_ok=True)
             else:
+                data_dir = tempfile.mkdtemp(prefix="bench_data_gui_")
                 db_dir = tempfile.mkdtemp(prefix="bench_db_gui_")
             
             try:
@@ -740,10 +771,10 @@ def render_benchmarks_page():
                         st.caption("Search Latency (lower is better)")
 
             finally:
-                # Cleanup — keep DB dir if saving
+                # Cleanup — keep both dirs if saving for searchable DB
                 if not save_db:
                     shutil.rmtree(db_dir, ignore_errors=True)
-                shutil.rmtree(data_dir, ignore_errors=True)
+                    shutil.rmtree(data_dir, ignore_errors=True)
                 
         elif run_btn and not selected_datasets:
             st.warning("Please select at least one dataset.")
