@@ -1,13 +1,20 @@
 import logging
 import os
 import time
+import shutil
+import tempfile
 from pathlib import Path
+import json
 
 import numpy as np
+import pandas as pd
 import streamlit as st
 from PIL import Image
 
+# Import project modules
 from similarity_engine import SimilarityEngine, DEFAULT_TABLE_NAME
+from datasets import download_dataset, AVAILABLE_DATASETS, list_datasets
+from benchmarks.bench_datasets import benchmark_dataset
 
 # Page configuration
 st.set_page_config(
@@ -19,64 +26,31 @@ st.set_page_config(
 
 # Initialize session state for the engine
 if "engine" not in st.session_state:
-    # Lazy load the engine only when needed
-    pass
+    st.session_state["engine"] = None
 
 @st.cache_resource
 def get_engine(db_path: str):
     """Cached engine initialization to avoid reloading model on every rerun."""
     return SimilarityEngine(db_path=db_path)
 
-def main():
-    st.title("🔍 Local Image Semantic Search")
-
-    # --- Sidebar Configuration ---
-    st.sidebar.header("Configuration")
-    
-    # DB Path Selection
-    default_db = "./lancedb"
-    db_path = st.sidebar.text_input("Database Path", value=default_db)
-    
-    # Load Engine
-    try:
-        engine = get_engine(db_path)
-        st.sidebar.success(f"Connected to {db_path}")
-    except Exception as e:
-        st.sidebar.error(f"Failed to load DB: {e}")
-        st.stop()
-
-    # Table Selection (if multiple tables supported in future)
-    table_name = DEFAULT_TABLE_NAME
-
-    # Show Stats
-    if st.sidebar.checkbox("Show DB Stats"):
-        try:
-            stats = engine.table_stats(table_name)
-            st.sidebar.json(stats)
-        except Exception:
-            st.sidebar.warning("Table not found or empty.")
-
-    st.sidebar.divider()
-    
+def render_search_page(engine, top_k):
+    """Render the Search page."""
     # --- Search Mode ---
-    search_mode = st.sidebar.radio("Search Mode", ["Text Query", "Image Query"])
-    
-    top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=50, value=12)
+    search_mode = st.radio("Search Mode", ["Text Query", "Image Query"], horizontal=True)
+    st.divider()
 
-    st.sidebar.divider()
-    st.sidebar.markdown("### About")
-    st.sidebar.info(
-        "Privacy-focused, local image similarity search using CLIP + LanceDB.\n"
-        "No data leaves your machine."
-    )
-
-    # --- Main Content ---
-    
     query = None
     
     if search_mode == "Text Query":
-        text_input = st.text_input("Describe what you're looking for:", placeholder="e.g., 'a red sports car in the rain'")
-        if text_input:
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            text_input = st.text_input("Describe what you're looking for:", placeholder="e.g., 'a red sports car in the rain'")
+        with col2:
+            st.write("") # spacer
+            st.write("")
+            search_btn = st.button("Search", type="primary", use_container_width=True)
+            
+        if text_input and (search_btn or text_input):
             query = text_input
             
     elif search_mode == "Image Query":
@@ -86,18 +60,6 @@ def main():
             image = Image.open(uploaded_file)
             st.image(image, caption="Query Image", width=250)
             
-            # Convert to RGB and numpy for the engine (if needed, but engine handles PIL/paths)
-            # The engine expects a path or a PIL image (actually engine._encode_query handles raw image?)
-            # Let's check engine.search signature. It takes `Union[str, Path, np.ndarray, Image.Image]`.
-            # Wait, engine.search signature in previous turns showed `Union[str, Path, np.ndarray]`.
-            # I should verify if I can pass a PIL image directly or if I need to save it / convert it.
-            # Looking at previous logs, `_encode_query` handles `str` (text/path) or `np.ndarray`.
-            # If I pass a PIL image, I might need to convert it to a temp path or update engine.
-            # Let's stick to what we know works: save to temp or convert to ndarray?
-            # Actually, `engine.search` calls `_encode_query`.
-            # Let's perform a quick fix: save uploaded file to temp for robustness, or assume engine handles it.
-            # To be safe and avoid modifying engine right now, I'll save to a temp file.
-            
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
                 image.save(tmp_file, format="JPEG")
@@ -105,8 +67,7 @@ def main():
     
     # --- Perform Search ---
     if query:
-        st.divider()
-        st.markdown(f"### Results for: *{query if isinstance(query, str) and len(query) < 50 else 'Image Query'}*")
+        st.markdown(f"### Results")
         
         with st.spinner("Searching..."):
             try:
@@ -143,6 +104,195 @@ def main():
             os.remove(query)
         except:
             pass
+
+def render_benchmarks_page():
+    """Render the Benchmarks page."""
+    st.header("📊 Dataset Benchmarks")
+    st.markdown("""
+    Run benchmarks on standard datasets to evaluate ingestion throughput and search latency.
+    This will download the dataset, ingest it using CLIP, and run sample queries.
+    """)
+
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        st.subheader("Configuration")
+        
+        # Dataset Selection
+        dataset_options = list(AVAILABLE_DATASETS.keys())
+        selected_datasets = st.multiselect(
+            "Select Datasets", 
+            dataset_options, 
+            default=["cifar10"]
+        )
+        
+        # Benchmark Parameters
+        batch_size = st.number_input("Batch Size", value=256, step=64)
+        workers = st.number_input("I/O Threads", value=8, min_value=1, max_value=32)
+        
+        run_btn = st.button("Run Benchmark", type="primary", use_container_width=True)
+
+    with col2:
+        if run_btn and selected_datasets:
+            results = []
+            
+            # Create progress indicators
+            status_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            # Create temp directories
+            data_dir = tempfile.mkdtemp(prefix="bench_data_gui_")
+            db_dir = tempfile.mkdtemp(prefix="bench_db_gui_")
+            
+            try:
+                total_steps = len(selected_datasets)
+                
+                for i, dataset_name in enumerate(selected_datasets):
+                    status_text.markdown(f"**Running benchmark: `{dataset_name}`...**")
+                    progress_bar.progress((i) / total_steps)
+                    
+                    # Capture stdout to show logs? Streamlit doesn't easily capture stdout live.
+                    # We'll rely on the final result for now, maybe show a spinner.
+                    
+                    with st.spinner(f"Processing {dataset_name} (Download → Ingest → Search)..."):
+                        # Run the benchmark function from bench_datasets.py
+                        # We need to import it. Added import at top.
+                        
+                        # Note: benchmark_dataset prints to stdout. 
+                        # We could redirect stdout to a StringIO if we want to show logs.
+                        
+                        try:
+                            res = benchmark_dataset(
+                                dataset_name,
+                                data_dir=data_dir,
+                                db_dir=db_dir,
+                                batch_size=batch_size,
+                                num_io_threads=workers,
+                                num_queries=50,
+                                top_k=10,
+                            )
+                            results.append(res)
+                            st.success(f"✅ {dataset_name} completed!")
+                            
+                            # Show immediate stats for this dataset
+                            with st.expander(f"Details: {dataset_name}", expanded=True):
+                                c1, c2, c3 = st.columns(3)
+                                c1.metric("Images", f"{res['num_images']:,}")
+                                c2.metric("Ingestion Rate", f"{res['ingest_throughput_ips']:.1f} img/s")
+                                c3.metric("Search Latency (P50)", f"{res['query_p50_ms']:.2f} ms")
+                                
+                                st.markdown("**Sample Search:**")
+                                st.write(f"Query: *{res['sample_query']}*")
+                                st.json(res['sample_results'])
+
+                        except Exception as e:
+                            st.error(f"Benchmark failed for {dataset_name}: {e}")
+                            logging.exception("Benchmark failed")
+
+                progress_bar.progress(1.0)
+                status_text.markdown("**All benchmarks completed!**")
+                
+                # --- Aggregate Results ---
+                if results:
+                    st.divider()
+                    st.subheader("Results Comparison")
+                    
+                    # Create DataFrame
+                    df = pd.DataFrame(results)
+                    
+                    # Select columns for display
+                    display_cols = [
+                        "dataset", "num_images", "ingest_throughput_ips", 
+                        "query_p50_ms", "query_p95_ms", "db_size_mb"
+                    ]
+                    
+                    # Rename for nicer display
+                    column_config = {
+                        "dataset": "Dataset",
+                        "num_images": "Images",
+                        "ingest_throughput_ips": "Throughput (img/s)",
+                        "query_p50_ms": "Latency P50 (ms)",
+                        "query_p95_ms": "Latency P95 (ms)",
+                        "db_size_mb": "DB Size (MB)"
+                    }
+                    
+                    st.dataframe(
+                        df[display_cols], 
+                        column_config=column_config,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    
+                    # Charts
+                    st.subheader("Performance Visualization")
+                    tab1, tab2 = st.tabs(["Throughput", "Latency"])
+                    
+                    with tab1:
+                        st.bar_chart(df.set_index("dataset")["ingest_throughput_ips"])
+                        st.caption("Ingestion Throughput (higher is better)")
+                        
+                    with tab2:
+                        st.bar_chart(df.set_index("dataset")[["query_p50_ms", "query_p95_ms"]])
+                        st.caption("Search Latency (lower is better)")
+
+            finally:
+                # Cleanup
+                shutil.rmtree(db_dir, ignore_errors=True)
+                shutil.rmtree(data_dir, ignore_errors=True)
+                
+        elif run_btn and not selected_datasets:
+            st.warning("Please select at least one dataset.")
+
+
+def main():
+    st.title("🔍 Local Image Semantic Search")
+
+    # --- Sidebar Configuration ---
+    st.sidebar.header("Navigation")
+    page = st.sidebar.radio("Go to", ["Search", "Benchmarks"])
+    
+    st.sidebar.divider()
+    st.sidebar.header("Configuration")
+    
+    # DB Path Selection
+    default_db = "./lancedb"
+    db_path = st.sidebar.text_input("Database Path", value=default_db)
+    
+    # Load Engine
+    try:
+        engine = get_engine(db_path)
+        if page == "Search":
+            st.sidebar.success(f"Connected to {db_path}")
+    except Exception as e:
+        st.sidebar.error(f"Failed to load DB: {e}")
+        st.stop()
+
+    # Table Selection (if multiple tables supported in future)
+    table_name = DEFAULT_TABLE_NAME
+
+    # Show Stats
+    if page == "Search" and st.sidebar.checkbox("Show DB Stats"):
+        try:
+            stats = engine.table_stats(table_name)
+            st.sidebar.json(stats)
+        except Exception:
+            st.sidebar.warning("Table not found or empty.")
+
+    st.sidebar.divider()
+    
+    # --- Page Routing ---
+    if page == "Search":
+        top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=50, value=12)
+        render_search_page(engine, top_k)
+    elif page == "Benchmarks":
+        render_benchmarks_page()
+
+    st.sidebar.divider()
+    st.sidebar.markdown("### About")
+    st.sidebar.info(
+        "Privacy-focused, local image similarity search using CLIP + LanceDB.\n"
+        "No data leaves your machine."
+    )
 
 if __name__ == "__main__":
     main()
