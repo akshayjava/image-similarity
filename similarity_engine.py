@@ -293,3 +293,220 @@ class SimilarityEngine:
             return {"table": table_name, "row_count": count}
         except Exception as e:
             return {"table": table_name, "error": str(e)}
+
+    # ------------------------------------------------------------------
+    # Advanced Analysis
+    # ------------------------------------------------------------------
+
+    def _get_all_embeddings(self, table_name: str = DEFAULT_TABLE_NAME):
+        """Extract all embeddings and IDs from a table.
+
+        Returns:
+            Tuple of (ids: list[str], embeddings: np.ndarray of shape [N, D])
+        """
+        table = self.db.open_table(table_name)
+        df = table.to_pandas()
+        ids = df["id"].tolist()
+        embeddings = np.stack(df["vector"].values).astype(np.float32)
+        return ids, embeddings
+
+    def find_duplicates(
+        self,
+        threshold: float = 0.05,
+        table_name: str = DEFAULT_TABLE_NAME,
+        progress_callback=None,
+    ) -> List[dict]:
+        """Find near-duplicate image pairs.
+
+        Uses brute-force cosine distance between all embeddings.
+        A pair is considered duplicate if distance < threshold.
+
+        Args:
+            threshold: Maximum cosine distance to consider a duplicate (0=identical).
+            table_name: LanceDB table to scan.
+            progress_callback: Optional fn(msg, progress_0_to_1).
+
+        Returns:
+            List of {"pair": [path_a, path_b], "distance": float}, sorted by distance.
+        """
+        if progress_callback:
+            progress_callback("Loading embeddings...", 0.0)
+
+        ids, embeddings = self._get_all_embeddings(table_name)
+        n = len(ids)
+
+        if progress_callback:
+            progress_callback(f"Scanning {n} images for duplicates...", 0.1)
+
+        # Normalize embeddings for cosine similarity
+        norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+        norms[norms == 0] = 1.0
+        normed = embeddings / norms
+
+        # Compute cosine distance matrix (1 - similarity)
+        # For large N, do in chunks to avoid OOM
+        duplicates = []
+        chunk_size = 500
+        total_chunks = (n + chunk_size - 1) // chunk_size
+
+        for ci in range(total_chunks):
+            start = ci * chunk_size
+            end = min(start + chunk_size, n)
+            chunk = normed[start:end]
+
+            # Cosine similarity: chunk @ normed.T
+            sim = chunk @ normed.T  # shape: [chunk_size, N]
+            dist = 1.0 - sim
+
+            for i_local in range(end - start):
+                i_global = start + i_local
+                for j in range(i_global + 1, n):
+                    if dist[i_local, j] < threshold:
+                        duplicates.append({
+                            "pair": [ids[i_global], ids[j]],
+                            "distance": float(dist[i_local, j]),
+                        })
+
+            if progress_callback:
+                progress_callback(
+                    f"Scanned {end}/{n} images...",
+                    0.1 + 0.9 * (end / n)
+                )
+
+        duplicates.sort(key=lambda x: x["distance"])
+        return duplicates
+
+    def cluster_images(
+        self,
+        n_clusters: int = 10,
+        table_name: str = DEFAULT_TABLE_NAME,
+        progress_callback=None,
+    ) -> dict:
+        """Cluster images using K-Means on CLIP embeddings.
+
+        Args:
+            n_clusters: Number of clusters.
+            table_name: LanceDB table.
+            progress_callback: Optional fn(msg, progress_0_to_1).
+
+        Returns:
+            dict with keys:
+                "clusters": {cluster_id: [list_of_paths]}
+                "stats": {"n_clusters": int, "n_images": int, "inertia": float}
+        """
+        from sklearn.cluster import KMeans
+
+        if progress_callback:
+            progress_callback("Loading embeddings...", 0.0)
+
+        ids, embeddings = self._get_all_embeddings(table_name)
+
+        if progress_callback:
+            progress_callback(f"Running K-Means (k={n_clusters})...", 0.2)
+
+        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        labels = kmeans.fit_predict(embeddings)
+
+        if progress_callback:
+            progress_callback("Organizing clusters...", 0.9)
+
+        clusters = {}
+        for idx, label in enumerate(labels):
+            label_key = int(label)
+            if label_key not in clusters:
+                clusters[label_key] = []
+            clusters[label_key].append(ids[idx])
+
+        return {
+            "clusters": clusters,
+            "stats": {
+                "n_clusters": n_clusters,
+                "n_images": len(ids),
+                "inertia": float(kmeans.inertia_),
+            }
+        }
+
+    def reduce_dimensions(
+        self,
+        method: str = "tsne",
+        n_components: int = 2,
+        table_name: str = DEFAULT_TABLE_NAME,
+        progress_callback=None,
+    ) -> List[dict]:
+        """Reduce embedding dimensions for visualization.
+
+        Args:
+            method: "tsne" or "umap".
+            n_components: Target dimensions (2 or 3).
+            table_name: LanceDB table.
+            progress_callback: Optional fn(msg, progress_0_to_1).
+
+        Returns:
+            List of {"id": path, "x": float, "y": float} dicts.
+        """
+        if progress_callback:
+            progress_callback("Loading embeddings...", 0.0)
+
+        ids, embeddings = self._get_all_embeddings(table_name)
+
+        if progress_callback:
+            progress_callback(f"Running {method.upper()} on {len(ids)} points...", 0.1)
+
+        if method == "umap":
+            try:
+                import umap
+                reducer = umap.UMAP(n_components=n_components, random_state=42)
+            except ImportError:
+                logger.warning("umap-learn not installed, falling back to t-SNE")
+                method = "tsne"
+
+        if method == "tsne":
+            from sklearn.manifold import TSNE
+            perplexity = min(30, len(ids) - 1)
+            reducer = TSNE(
+                n_components=n_components,
+                random_state=42,
+                perplexity=max(5, perplexity),
+            )
+
+        reduced = reducer.fit_transform(embeddings)
+
+        if progress_callback:
+            progress_callback("Done!", 1.0)
+
+        result = []
+        for i, id_ in enumerate(ids):
+            point = {"id": id_, "x": float(reduced[i, 0]), "y": float(reduced[i, 1])}
+            if n_components == 3:
+                point["z"] = float(reduced[i, 2])
+            result.append(point)
+
+        return result
+
+    def quantize_table(self, table_name: str = DEFAULT_TABLE_NAME) -> dict:
+        """Quantize embeddings from float32 to float16 to reduce DB size.
+
+        Returns:
+            dict with before/after size info.
+        """
+        import pyarrow as pa
+
+        table = self.db.open_table(table_name)
+        df = table.to_pandas()
+        original_count = len(df)
+
+        # Convert float32 vectors to float16
+        vectors_f16 = [v.astype(np.float16) for v in df["vector"].values]
+        df["vector"] = vectors_f16
+
+        # Overwrite table
+        self.db.drop_table(table_name)
+        self.db.create_table(table_name, df)
+
+        return {
+            "rows": original_count,
+            "dtype_before": "float32",
+            "dtype_after": "float16",
+            "estimated_reduction": "~50%",
+        }
+

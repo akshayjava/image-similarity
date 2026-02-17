@@ -118,6 +118,56 @@ def cmd_demo(args):
     print()
 
 
+def cmd_duplicates(args):
+    engine = SimilarityEngine(db_path=args.db_path)
+    print(f"Scanning for duplicates (threshold={args.threshold})...")
+    dups = engine.find_duplicates(threshold=args.threshold)
+    print(f"\nFound {len(dups)} duplicate pair(s):\n")
+    if args.json:
+        print(json.dumps(dups, indent=2))
+    else:
+        for i, d in enumerate(dups[:args.limit], 1):
+            print(f"  {i}. [{d['distance']:.6f}]")
+            print(f"     A: {d['pair'][0]}")
+            print(f"     B: {d['pair'][1]}")
+        if len(dups) > args.limit:
+            print(f"  ... and {len(dups) - args.limit} more pairs")
+    print()
+
+
+def cmd_cluster(args):
+    engine = SimilarityEngine(db_path=args.db_path)
+    print(f"Clustering into {args.n_clusters} groups...")
+    result = engine.cluster_images(n_clusters=args.n_clusters)
+    stats = result["stats"]
+    print(f"\nClustered {stats['n_images']} images into {stats['n_clusters']} groups")
+    print(f"Inertia: {stats['inertia']:.2f}\n")
+    if args.json:
+        print(json.dumps(result, indent=2))
+    else:
+        for cid, paths in sorted(result["clusters"].items()):
+            print(f"  Cluster {cid} ({len(paths)} images):")
+            for p in paths[:3]:
+                print(f"    - {p}")
+            if len(paths) > 3:
+                print(f"    ... and {len(paths) - 3} more")
+    print()
+
+
+def cmd_quantize(args):
+    engine = SimilarityEngine(db_path=args.db_path)
+    print("Quantizing embeddings (float32 → float16)...")
+    result = engine.quantize_table()
+    print(f"Done! {result['rows']} vectors quantized.")
+    print(json.dumps(result, indent=2))
+
+
+def cmd_export_onnx(args):
+    from onnx_export import export_clip_to_onnx
+    export_clip_to_onnx(output_dir=args.output_dir)
+    print(f"ONNX models exported to {args.output_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="image-similarity",
@@ -173,6 +223,28 @@ def main():
     p_demo.add_argument("--batch-size", type=int, default=256, help="Ingestion batch size")
     p_demo.add_argument("--workers", type=int, default=8, help="I/O threads")
     p_demo.set_defaults(func=cmd_demo)
+
+    # --- duplicates ---
+    p_dup = subparsers.add_parser("duplicates", help="Find near-duplicate images")
+    p_dup.add_argument("--threshold", type=float, default=0.05, help="Max cosine distance (default: 0.05)")
+    p_dup.add_argument("--limit", type=int, default=50, help="Max pairs to display (default: 50)")
+    p_dup.add_argument("--json", action="store_true", help="Output as JSON")
+    p_dup.set_defaults(func=cmd_duplicates)
+
+    # --- cluster ---
+    p_clust = subparsers.add_parser("cluster", help="Cluster images by similarity")
+    p_clust.add_argument("--n-clusters", type=int, default=10, help="Number of clusters (default: 10)")
+    p_clust.add_argument("--json", action="store_true", help="Output as JSON")
+    p_clust.set_defaults(func=cmd_cluster)
+
+    # --- quantize ---
+    p_quant = subparsers.add_parser("quantize", help="Quantize vectors float32→float16")
+    p_quant.set_defaults(func=cmd_quantize)
+
+    # --- export-onnx ---
+    p_onnx = subparsers.add_parser("export-onnx", help="Export CLIP to ONNX format")
+    p_onnx.add_argument("--output-dir", default="./models", help="Output directory (default: ./models)")
+    p_onnx.set_defaults(func=cmd_export_onnx)
 
     args = parser.parse_args()
 

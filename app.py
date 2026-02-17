@@ -145,12 +145,172 @@ def render_manage_page():
                 st.error("Name and Source Directory are required.")
 
 
+def render_tools_page(engine):
+    """Render the Tools page with Duplicate Detection, Clustering, and Explorer."""
+    st.header("🛠️ Analysis Tools")
+
+    tab_dup, tab_clust, tab_explore = st.tabs(
+        ["🔍 Duplicate Detection", "📊 Clustering", "🗺️ Visual Explorer"]
+    )
+
+    # ---- Duplicate Detection ----
+    with tab_dup:
+        st.subheader("Find Near-Duplicate Images")
+        st.caption("Scan your database for image pairs with very similar CLIP embeddings.")
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            threshold = st.slider(
+                "Distance Threshold", min_value=0.01, max_value=0.30,
+                value=0.05, step=0.01,
+                help="Lower = stricter matching. 0.05 is a good default."
+            )
+            scan_btn = st.button("🔎 Scan for Duplicates", type="primary", use_container_width=True)
+
+        with col2:
+            if scan_btn:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def dup_cb(msg, p):
+                    progress_bar.progress(min(p, 0.99))
+                    status_text.text(msg)
+
+                try:
+                    dups = engine.find_duplicates(
+                        threshold=threshold, progress_callback=dup_cb
+                    )
+                    progress_bar.progress(1.0)
+                    status_text.text(f"Done! Found {len(dups)} duplicate pair(s).")
+
+                    if not dups:
+                        st.success("No duplicates found! Your dataset is clean.")
+                    else:
+                        st.warning(f"Found **{len(dups)}** potential duplicate pairs.")
+                        for i, d in enumerate(dups[:20]):
+                            with st.expander(
+                                f"Pair {i+1} — distance: {d['distance']:.6f}",
+                                expanded=(i < 3)
+                            ):
+                                c1, c2 = st.columns(2)
+                                for ci, path in enumerate([d["pair"][0], d["pair"][1]]):
+                                    with [c1, c2][ci]:
+                                        if os.path.exists(path):
+                                            st.image(Image.open(path), use_column_width=True)
+                                        st.caption(f"`{Path(path).name}`")
+                        if len(dups) > 20:
+                            st.info(f"Showing first 20 of {len(dups)} pairs.")
+                except Exception as e:
+                    st.error(f"Scan failed: {e}")
+
+    # ---- Clustering ----
+    with tab_clust:
+        st.subheader("Image Clustering (K-Means)")
+        st.caption("Group similar images into clusters based on their CLIP embeddings.")
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            n_clusters = st.slider("Number of Clusters", min_value=2, max_value=50, value=10)
+            cluster_btn = st.button("📊 Run Clustering", type="primary", use_container_width=True)
+
+        with col2:
+            if cluster_btn:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def clust_cb(msg, p):
+                    progress_bar.progress(min(p, 0.99))
+                    status_text.text(msg)
+
+                try:
+                    result = engine.cluster_images(
+                        n_clusters=n_clusters, progress_callback=clust_cb
+                    )
+                    progress_bar.progress(1.0)
+                    stats = result["stats"]
+                    status_text.text(
+                        f"Done! {stats['n_images']} images → {stats['n_clusters']} clusters"
+                    )
+
+                    # Show cluster stats
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Images", f"{stats['n_images']:,}")
+                    c2.metric("Clusters", stats['n_clusters'])
+                    c3.metric("Inertia", f"{stats['inertia']:.0f}")
+
+                    # Show each cluster
+                    for cid in sorted(result["clusters"].keys()):
+                        paths = result["clusters"][cid]
+                        with st.expander(
+                            f"Cluster {cid} ({len(paths)} images)",
+                            expanded=(cid < 3)
+                        ):
+                            cols = st.columns(min(6, len(paths)))
+                            for j, path in enumerate(paths[:6]):
+                                with cols[j]:
+                                    if os.path.exists(path):
+                                        st.image(Image.open(path), use_column_width=True)
+                                    st.caption(f"`{Path(path).name}`")
+                            if len(paths) > 6:
+                                st.caption(f"... and {len(paths) - 6} more")
+                except Exception as e:
+                    st.error(f"Clustering failed: {e}")
+
+    # ---- Visual Explorer ----
+    with tab_explore:
+        st.subheader("Embedding Space Explorer")
+        st.caption("Visualize your image database as a 2D scatter plot using t-SNE or UMAP.")
+
+        col1, col2 = st.columns([1, 3])
+        with col1:
+            method = st.selectbox("Reduction Method", ["tsne", "umap"])
+            explore_btn = st.button("🗺️ Generate Map", type="primary", use_container_width=True)
+
+        with col2:
+            if explore_btn:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                def explore_cb(msg, p):
+                    progress_bar.progress(min(p, 0.99))
+                    status_text.text(msg)
+
+                try:
+                    points = engine.reduce_dimensions(
+                        method=method, progress_callback=explore_cb
+                    )
+                    progress_bar.progress(1.0)
+                    status_text.text(f"Done! {len(points)} points plotted.")
+
+                    import plotly.express as px
+
+                    df = pd.DataFrame(points)
+                    df["label"] = df["id"].apply(lambda x: Path(x).name)
+
+                    fig = px.scatter(
+                        df, x="x", y="y",
+                        hover_name="label",
+                        hover_data={"id": True, "x": ":.2f", "y": ":.2f"},
+                        title=f"{method.upper()} Projection of Image Embeddings",
+                        width=900, height=700,
+                    )
+                    fig.update_traces(marker=dict(size=5, opacity=0.7))
+                    fig.update_layout(
+                        xaxis_title="", yaxis_title="",
+                        template="plotly_dark",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+
+                except Exception as e:
+                    st.error(f"Explorer failed: {e}")
+
+
 def main():
     st.title("🔍 Local Image Semantic Search")
 
     # --- Sidebar Configuration ---
     st.sidebar.header("Navigation")
-    page = st.sidebar.radio("Go to", ["Search", "Benchmarks", "Manage Databases"])
+    page = st.sidebar.radio("Go to", ["Search", "Tools", "Benchmarks", "Manage Databases"])
     
     st.sidebar.divider()
     st.sidebar.header("Configuration")
@@ -201,12 +361,14 @@ def main():
     if page == "Search":
         top_k = st.sidebar.slider("Top K Results", min_value=1, max_value=50, value=12)
         render_search_page(engine, top_k)
+    elif page == "Tools":
+        render_tools_page(engine)
     elif page == "Benchmarks":
         render_benchmarks_page()
     elif page == "Manage Databases":
         render_manage_page()
 
-    if page != "Manage Databases":
+    if page not in ("Manage Databases", "Tools"):
         st.sidebar.divider()
         st.sidebar.markdown("### About")
         st.sidebar.info(
