@@ -69,7 +69,7 @@ def render_manage_page():
 
     st.divider()
     
-    tab1, tab2 = st.tabs(["Add Existing", "Create New (Ingest)"])
+    tab1, tab2, tab3 = st.tabs(["Add Existing", "Create New (Ingest)", "Create from Dataset"])
     
     with tab1:
         st.subheader("Add Existing Database")
@@ -89,16 +89,8 @@ def render_manage_page():
                 
     with tab2:
         st.subheader("Create New Database (Ingest)")
-        cn_name = st.text_input("New DB Name", placeholder="e.g., CIFAR10_DB")
+        cn_name = st.text_input("New DB Name", placeholder="e.g., MyPhotos_DB")
         cn_source = st.text_input("Source Image Directory", placeholder="/path/to/images")
-        
-        # Optional: Custom DB path? Or just use ./lancedb_{name}?
-        # Let's let user specify location or default to ./dbs/{name}
-        # For simplicity, let's use a standard location: `projects/image-similarity/dbs/{name}`
-        # Or let user specify destination?
-        # User request: "create and manage databases based on directory indexed"
-        # Implies we create the DB.
-        
         cn_dest = st.text_input("Destination DB Path (Optional)", placeholder="Leave empty to use ./dbs/<name>")
         
         if st.button("Ingest & Create"):
@@ -107,42 +99,118 @@ def render_manage_page():
                     st.error("Source directory not found.")
                 else:
                     target_db_path = cn_dest if cn_dest else f"./dbs/{cn_name}"
-                    
-                    # Create directory if needed
                     os.makedirs(target_db_path, exist_ok=True)
                     
-                    status_text = st.empty()
-                    progress_bar = st.progress(0)
+                    import sys, io
+                    console_box = st.empty()
                     
+                    class _IngestCapture(io.TextIOBase):
+                        def __init__(self, el, max_lines=30):
+                            self._lines, self._cur, self._el, self._max = [], "", el, max_lines
+                        def write(self, t):
+                            if not t: return 0
+                            for j, part in enumerate(t.split("\r")):
+                                if j > 0: self._cur = ""
+                                for k, sub in enumerate(part.split("\n")):
+                                    if k > 0: self._lines.append(self._cur); self._cur = ""
+                                    self._cur += sub
+                            d = self._lines[-self._max:] if len(self._lines) > self._max else self._lines
+                            out = "\n".join(d) + ("\n" + self._cur if self._cur else "")
+                            self._el.code(out, language=None)
+                            return len(t)
+                        def flush(self): pass
+                    
+                    cap = _IngestCapture(console_box)
+                    old_out, old_err = sys.stdout, sys.stderr
                     try:
-                        status_text.text("Initializing engine...")
-                        # Use a temporary engine to ingest
+                        sys.stdout = cap
+                        sys.stderr = cap
                         ingest_engine = SimilarityEngine(db_path=target_db_path)
+                        stats = ingest_engine.index(cn_source)
+                    finally:
+                        sys.stdout = old_out
+                        sys.stderr = old_err
                         
-                        # Ingest
-                        status_text.text(f"Ingesting from {cn_source}...")
-                        
-                        # We need a progress callback for ingestion too if we want it smooth,
-                        # but SimilarityEngine.index doesn't support it yet?
-                        # Wait, index() uses tqdm. Streamlit can't capture tqdm easily.
-                        # Unless we modify SimilarityEngine.index to take a callback?
-                        # For now, just run it. It returns stats.
-                        
-                        with st.spinner("Ingesting images... This may take a while."):
-                            stats = ingest_engine.index(cn_source)
-                            
-                        st.success(f"Ingestion complete! {stats['total_indexed']} images indexed.")
-                        
-                        # Register
-                        db_config.add_database(cn_name, target_db_path)
-                        st.success(f"Database '{cn_name}' registered successfully.")
-                        time.sleep(1)
-                        st.rerun()
-                        
-                    except Exception as e:
-                        st.error(f"Ingestion failed: {e}")
+                    st.success(f"✅ Ingestion complete! {stats['total_indexed']} images indexed.")
+                    db_config.add_database(cn_name, target_db_path)
+                    st.success(f"Database '{cn_name}' registered. Switch to it in the sidebar.")
+                    time.sleep(1)
+                    st.rerun()
             else:
                 st.error("Name and Source Directory are required.")
+    
+    with tab3:
+        st.subheader("Create from Benchmark Dataset")
+        st.caption("Download a standard dataset, ingest it, and create a searchable database.")
+        
+        ds_name = st.selectbox("Dataset", list(AVAILABLE_DATASETS.keys()), key="manage_ds_select")
+        ds_info = AVAILABLE_DATASETS.get(ds_name, {})
+        st.info(f"{ds_info.get('description', ds_name)} — Size: {ds_info.get('size', '?')}")
+        
+        ds_db_name = st.text_input("Database Name", value=f"{ds_name}_db", key="manage_ds_db_name")
+        
+        if st.button("📥 Download & Create DB", type="primary", key="manage_ds_create"):
+            if not ds_db_name:
+                st.error("Database name is required.")
+            else:
+                import sys, io
+                target_db_path = f"./dbs/{ds_db_name}"
+                data_dir = tempfile.mkdtemp(prefix="ds_download_")
+                
+                console_box = st.empty()
+                progress_bar = st.progress(0)
+                
+                class _DSCapture(io.TextIOBase):
+                    def __init__(self, el, max_lines=30):
+                        self._lines, self._cur, self._el, self._max = [], "", el, max_lines
+                    def write(self, t):
+                        if not t: return 0
+                        for j, part in enumerate(t.split("\r")):
+                            if j > 0: self._cur = ""
+                            for k, sub in enumerate(part.split("\n")):
+                                if k > 0: self._lines.append(self._cur); self._cur = ""
+                                self._cur += sub
+                        d = self._lines[-self._max:] if len(self._lines) > self._max else self._lines
+                        out = "\n".join(d) + ("\n" + self._cur if self._cur else "")
+                        self._el.code(out, language=None)
+                        return len(t)
+                    def flush(self): pass
+                
+                cap = _DSCapture(console_box)
+                old_out, old_err = sys.stdout, sys.stderr
+                
+                try:
+                    sys.stdout = cap
+                    sys.stderr = cap
+                    
+                    # Step 1: Download
+                    print(f"[1/2] Downloading {ds_name}...")
+                    def dl_cb(msg, p):
+                        progress_bar.progress(min(p * 0.5, 0.49))
+                    
+                    export_path = download_dataset(ds_name, dest_dir=data_dir, progress_callback=dl_cb)
+                    num_imgs = sum(1 for _ in Path(export_path).rglob("*.jpg"))
+                    print(f"       Downloaded {num_imgs:,} images")
+                    
+                    # Step 2: Ingest
+                    print(f"[2/2] Ingesting into '{ds_db_name}'...")
+                    progress_bar.progress(0.5)
+                    os.makedirs(target_db_path, exist_ok=True)
+                    ingest_engine = SimilarityEngine(db_path=target_db_path)
+                    stats = ingest_engine.index(export_path)
+                    print(f"       Indexed {stats['total_indexed']:,} images")
+                    progress_bar.progress(1.0)
+                    
+                finally:
+                    sys.stdout = old_out
+                    sys.stderr = old_err
+                    shutil.rmtree(data_dir, ignore_errors=True)
+                
+                db_config.add_database(ds_db_name, target_db_path)
+                st.success(f"✅ Database '{ds_db_name}' created with {stats['total_indexed']:,} images!")
+                st.info("Switch to this database in the sidebar to search it.")
+                time.sleep(1)
+                st.rerun()
 
 
 def render_tools_page(engine):
@@ -475,6 +543,13 @@ def render_benchmarks_page():
         batch_size = st.number_input("Batch Size", value=256, step=64)
         workers = st.number_input("I/O Threads", value=8, min_value=1, max_value=32)
         
+        st.divider()
+        save_db = st.checkbox(
+            "Save as searchable database",
+            value=False,
+            help="Keep the benchmark DB so you can search it from the Search page."
+        )
+        
         run_btn = st.button("Run Benchmark", type="primary", use_container_width=True)
 
     with col2:
@@ -486,9 +561,13 @@ def render_benchmarks_page():
             progress_bar = st.progress(0)
             console_box = st.empty()     # live CLI output
             
-            # Create temp directories
+            # Create directories — persistent if save_db is checked
             data_dir = tempfile.mkdtemp(prefix="bench_data_gui_")
-            db_dir = tempfile.mkdtemp(prefix="bench_db_gui_")
+            if save_db:
+                db_dir = os.path.join("./dbs", "benchmarks")
+                os.makedirs(db_dir, exist_ok=True)
+            else:
+                db_dir = tempfile.mkdtemp(prefix="bench_db_gui_")
             
             try:
                 import time as _time
@@ -595,6 +674,13 @@ def render_benchmarks_page():
                     st.success(f"✅ **{dataset_name}** completed in {bench_elapsed:.1f}s")
                     
                     if res:
+                        # Register as searchable DB if requested
+                        if save_db:
+                            bench_db_name = f"{dataset_name}_bench"
+                            bench_db_path = os.path.join(db_dir, dataset_name)
+                            db_config.add_database(bench_db_name, bench_db_path)
+                            st.info(f"💾 Saved as database **{bench_db_name}** — switch to it in the sidebar to search.")
+                        
                         with st.expander(f"📋 Details: {dataset_name}", expanded=True):
                             # Show the CLI output
                             st.code(final_output, language=None)
@@ -654,8 +740,9 @@ def render_benchmarks_page():
                         st.caption("Search Latency (lower is better)")
 
             finally:
-                # Cleanup
-                shutil.rmtree(db_dir, ignore_errors=True)
+                # Cleanup — keep DB dir if saving
+                if not save_db:
+                    shutil.rmtree(db_dir, ignore_errors=True)
                 shutil.rmtree(data_dir, ignore_errors=True)
                 
         elif run_btn and not selected_datasets:
