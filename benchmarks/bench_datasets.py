@@ -103,10 +103,16 @@ def benchmark_dataset(
     # Step 1: Download
     # ------------------------------------------------------------------
     if progress_callback:
-        progress_callback(f"Downloading {dataset_name}...", 0.1)
+        progress_callback(f"[1/4] Downloading {dataset_name}...", 0.0)
     print(f"\n  [1/4] Downloading {dataset_name}...")
     t0 = time.perf_counter()
-    export_path = download_dataset(dataset_name, dest_dir=data_dir)
+
+    # Create a sub-callback that maps download progress (0-1) to global (0-0.25)
+    def download_cb(msg, p):
+        if progress_callback:
+            progress_callback(f"[1/4] {msg}", 0.0 + p * 0.25)
+
+    export_path = download_dataset(dataset_name, dest_dir=data_dir, progress_callback=download_cb)
     download_time = time.perf_counter() - t0
 
     num_images = count_files(export_path)
@@ -123,7 +129,7 @@ def benchmark_dataset(
     # Step 2: Ingest
     # ------------------------------------------------------------------
     if progress_callback:
-        progress_callback(f"Ingesting {dataset_name}...", 0.3)
+        progress_callback(f"[2/4] Ingesting {dataset_name} with CLIP...", 0.25)
     print(f"  [2/4] Ingesting with CLIP...")
     engine = SimilarityEngine(db_path=db_path)
 
@@ -152,7 +158,7 @@ def benchmark_dataset(
     # Step 3: Search latency
     # ------------------------------------------------------------------
     if progress_callback:
-        progress_callback(f"Measuring search latency...", 0.8)
+        progress_callback(f"[3/4] Measuring search latency ({num_queries} queries)...", 0.70)
     print(f"  [3/4] Measuring search latency ({num_queries} queries)...")
     queries = SAMPLE_QUERIES.get(dataset_name, ["object"])
 
@@ -178,7 +184,7 @@ def benchmark_dataset(
     # Step 4: Sample results (qualitative)
     # ------------------------------------------------------------------
     if progress_callback:
-        progress_callback(f"Running sample queries...", 0.95)
+        progress_callback(f"[4/4] Running sample queries...", 0.90)
     print(f"  [4/4] Sample search results:")
     sample_query = queries[0]
     results = engine.search(query=sample_query, top_k=5)

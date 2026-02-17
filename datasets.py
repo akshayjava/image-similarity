@@ -77,6 +77,7 @@ def download_dataset(
     name: str,
     dest_dir: str,
     split: str = "all",
+    progress_callback=None,
 ) -> str:
     """Download a dataset and export images organized by class.
 
@@ -86,6 +87,7 @@ def download_dataset(
         name: Dataset name (one of AVAILABLE_DATASETS keys).
         dest_dir: Root destination directory.
         split: Which split to download — 'train', 'test', or 'all'.
+        progress_callback: Optional fn(msg, progress_0_to_1).
 
     Returns:
         Path to the exported dataset directory.
@@ -102,18 +104,18 @@ def download_dataset(
     cache_dir = dest / ".cache"
 
     if name == "cifar10":
-        return _download_cifar10(cache_dir, export_dir, split)
+        return _download_cifar10(cache_dir, export_dir, split, progress_callback)
     elif name == "stl10":
-        return _download_stl10(cache_dir, export_dir, split)
+        return _download_stl10(cache_dir, export_dir, split, progress_callback)
     elif name == "flowers102":
-        return _download_flowers102(cache_dir, export_dir, split)
+        return _download_flowers102(cache_dir, export_dir, split, progress_callback)
     elif name == "caltech101":
-        return _download_caltech101(cache_dir, export_dir)
+        return _download_caltech101(cache_dir, export_dir, progress_callback)
     else:
         raise ValueError(f"Dataset '{name}' not yet implemented.")
 
 
-def _download_cifar10(cache_dir: Path, export_dir: Path, split: str) -> str:
+def _download_cifar10(cache_dir: Path, export_dir: Path, split: str, progress_callback=None) -> str:
     """Download CIFAR-10 and export as individual images."""
     from torchvision.datasets import CIFAR10
 
@@ -124,10 +126,14 @@ def _download_cifar10(cache_dir: Path, export_dir: Path, split: str) -> str:
         splits.append(("test", False))
 
     total = 0
+    expected = AVAILABLE_DATASETS["cifar10"]["images"]
     for split_name, is_train in splits:
+        if progress_callback:
+            progress_callback(f"Downloading CIFAR-10 {split_name} split...", total / max(expected, 1))
         logger.info("Downloading CIFAR-10 %s split...", split_name)
         dataset = CIFAR10(root=str(cache_dir), train=is_train, download=True)
 
+        n = len(dataset)
         for idx, (img, label) in enumerate(tqdm(
             dataset, desc=f"Exporting CIFAR-10 {split_name}", unit=" imgs",
         )):
@@ -136,12 +142,14 @@ def _download_cifar10(cache_dir: Path, export_dir: Path, split: str) -> str:
             class_dir.mkdir(parents=True, exist_ok=True)
             img.save(class_dir / f"{split_name}_{idx:05d}.jpg")
             total += 1
+            if progress_callback and idx % 500 == 0:
+                progress_callback(f"Exporting {split_name}: {total:,}/{expected:,} images", total / max(expected, 1))
 
     logger.info("CIFAR-10: exported %d images to %s", total, export_dir)
     return str(export_dir)
 
 
-def _download_stl10(cache_dir: Path, export_dir: Path, split: str) -> str:
+def _download_stl10(cache_dir: Path, export_dir: Path, split: str, progress_callback=None) -> str:
     """Download STL-10 and export as individual images."""
     from torchvision.datasets import STL10
 
@@ -154,7 +162,10 @@ def _download_stl10(cache_dir: Path, export_dir: Path, split: str) -> str:
         splits.append("unlabeled")
 
     total = 0
+    expected = AVAILABLE_DATASETS["stl10"]["images"]
     for split_name in splits:
+        if progress_callback:
+            progress_callback(f"Downloading STL-10 {split_name} split...", total / max(expected, 1))
         logger.info("Downloading STL-10 %s split...", split_name)
         dataset = STL10(root=str(cache_dir), split=split_name, download=True)
 
@@ -168,12 +179,14 @@ def _download_stl10(cache_dir: Path, export_dir: Path, split: str) -> str:
             class_dir.mkdir(parents=True, exist_ok=True)
             img.save(class_dir / f"{split_name}_{idx:05d}.jpg")
             total += 1
+            if progress_callback and idx % 500 == 0:
+                progress_callback(f"Exporting {split_name}: {total:,}/{expected:,} images", total / max(expected, 1))
 
     logger.info("STL-10: exported %d images to %s", total, export_dir)
     return str(export_dir)
 
 
-def _download_flowers102(cache_dir: Path, export_dir: Path, split: str) -> str:
+def _download_flowers102(cache_dir: Path, export_dir: Path, split: str, progress_callback=None) -> str:
     """Download Oxford Flowers 102 and export as individual images."""
     from torchvision.datasets import Flowers102
 
@@ -186,7 +199,10 @@ def _download_flowers102(cache_dir: Path, export_dir: Path, split: str) -> str:
         splits.append("val")
 
     total = 0
+    expected = AVAILABLE_DATASETS["flowers102"]["images"]
     for split_name in splits:
+        if progress_callback:
+            progress_callback(f"Downloading Flowers102 {split_name} split...", total / max(expected, 1))
         logger.info("Downloading Flowers102 %s split...", split_name)
         dataset = Flowers102(root=str(cache_dir), split=split_name, download=True)
 
@@ -199,19 +215,24 @@ def _download_flowers102(cache_dir: Path, export_dir: Path, split: str) -> str:
                 img = Image.fromarray(img)
             img.convert("RGB").save(class_dir / f"{split_name}_{idx:05d}.jpg")
             total += 1
+            if progress_callback and idx % 200 == 0:
+                progress_callback(f"Exporting {split_name}: {total:,}/{expected:,} images", total / max(expected, 1))
 
     logger.info("Flowers102: exported %d images to %s", total, export_dir)
     return str(export_dir)
 
 
-def _download_caltech101(cache_dir: Path, export_dir: Path) -> str:
+def _download_caltech101(cache_dir: Path, export_dir: Path, progress_callback=None) -> str:
     """Download Caltech-101 and export as individual images."""
     from torchvision.datasets import Caltech101
 
+    if progress_callback:
+        progress_callback("Downloading Caltech-101...", 0.0)
     logger.info("Downloading Caltech-101...")
     dataset = Caltech101(root=str(cache_dir), download=True)
 
     total = 0
+    expected = AVAILABLE_DATASETS["caltech101"]["images"]
     for idx in tqdm(range(len(dataset)), desc="Exporting Caltech-101", unit=" imgs"):
         img, label = dataset[idx]
         class_name = dataset.categories[label]
@@ -221,6 +242,8 @@ def _download_caltech101(cache_dir: Path, export_dir: Path) -> str:
             img = Image.fromarray(img)
         img.convert("RGB").save(class_dir / f"{idx:05d}.jpg")
         total += 1
+        if progress_callback and idx % 200 == 0:
+            progress_callback(f"Exporting: {total:,}/{expected:,} images", total / max(expected, 1))
 
     logger.info("Caltech-101: exported %d images to %s", total, export_dir)
     return str(export_dir)

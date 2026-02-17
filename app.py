@@ -481,71 +481,136 @@ def render_benchmarks_page():
         if run_btn and selected_datasets:
             results = []
             
-            # Create progress indicators
+            # ── Live progress dashboard ──
             status_text = st.empty()
             progress_bar = st.progress(0)
+            console_box = st.empty()     # live CLI output
             
             # Create temp directories
             data_dir = tempfile.mkdtemp(prefix="bench_data_gui_")
             db_dir = tempfile.mkdtemp(prefix="bench_db_gui_")
             
             try:
+                import time as _time
+                import io
+                import sys
+                
+                # --- Stream capture for live CLI output ---
+                class StreamCapture(io.TextIOBase):
+                    """Captures writes (print + tqdm) and updates a Streamlit code block."""
+                    def __init__(self, st_element, max_lines=40):
+                        self._lines = []          # finished lines
+                        self._current = ""        # line being built (tqdm uses \r)
+                        self._el = st_element
+                        self._max = max_lines
+                    
+                    def write(self, text):
+                        if not text:
+                            return 0
+                        # tqdm writes \r to overwrite the current line
+                        parts = text.split("\r")
+                        for j, part in enumerate(parts):
+                            if j > 0:
+                                # \r  → overwrite current line
+                                self._current = ""
+                            sub = part.split("\n")
+                            self._current += sub[0]
+                            for k in range(1, len(sub)):
+                                self._lines.append(self._current)
+                                self._current = sub[k]
+                        self._refresh()
+                        return len(text)
+                    
+                    def flush(self):
+                        pass
+                    
+                    def _refresh(self):
+                        display = self._lines[-self._max:] if len(self._lines) > self._max else self._lines
+                        out = "\n".join(display)
+                        if self._current:
+                            out += "\n" + self._current
+                        self._el.code(out, language=None)
+                    
+                    def get_text(self):
+                        out = "\n".join(self._lines)
+                        if self._current:
+                            out += "\n" + self._current
+                        return out
+                
                 total_steps = len(selected_datasets)
                 
                 for i, dataset_name in enumerate(selected_datasets):
-                    status_text.markdown(f"**Running benchmark: `{dataset_name}`...**")
-                    progress_bar.progress((i) / total_steps)
+                    ds_info = AVAILABLE_DATASETS.get(dataset_name, {})
+                    expected_imgs = ds_info.get("images", "?")
+                    ds_size = ds_info.get("size", "?")
                     
-                    # Capture stdout to show logs? Streamlit doesn't easily capture stdout live.
-                    # We'll rely on the final result for now, maybe show a spinner.
+                    status_text.markdown(
+                        f"### 🔄 `{dataset_name}` ({i+1}/{total_steps})\n"
+                        f"**{ds_info.get('description', dataset_name)}** &nbsp;|&nbsp; "
+                        f"Size: {ds_size} &nbsp;|&nbsp; ~{expected_imgs:,} images"
+                    )
+                    progress_bar.progress(i / total_steps)
                     
-                    with st.spinner(f"Processing {dataset_name} (Download → Ingest → Search)..."):
-                        # Run the benchmark function from bench_datasets.py
-                        # We need to import it. Added import at top.
+                    bench_start = _time.perf_counter()
+                    
+                    # Set up stream capture
+                    capture = StreamCapture(console_box)
+                    old_stdout = sys.stdout
+                    old_stderr = sys.stderr
+                    
+                    try:
+                        # Redirect stdout + stderr so print() and tqdm output
+                        # both appear in the live console
+                        sys.stdout = capture
+                        sys.stderr = capture
                         
-                        # Note: benchmark_dataset prints to stdout. 
-                        # We could redirect stdout to a StringIO if we want to show logs.
-                        
-                        try:
-                            def progress_cb(msg, p):
-                                # p is 0.0-1.0 within this dataset
-                                # global progress = (i + p) / total_steps
-                                global_p = min((i + p) / total_steps, 0.99)
-                                progress_bar.progress(global_p)
-                                status_text.markdown(f"**{dataset_name}: {msg}**")
+                        def progress_cb(msg, p, _i=i):
+                            global_p = min((_i + p) / total_steps, 0.99)
+                            progress_bar.progress(global_p)
 
-                            res = benchmark_dataset(
-                                dataset_name,
-                                data_dir=data_dir,
-                                db_dir=db_dir,
-                                batch_size=batch_size,
-                                num_io_threads=workers,
-                                num_queries=50,
-                                top_k=10,
-                                progress_callback=progress_cb,
-                            )
-                            results.append(res)
-                            st.success(f"✅ {dataset_name} completed!")
+                        res = benchmark_dataset(
+                            dataset_name,
+                            data_dir=data_dir,
+                            db_dir=db_dir,
+                            batch_size=batch_size,
+                            num_io_threads=workers,
+                            num_queries=50,
+                            top_k=10,
+                            progress_callback=progress_cb,
+                        )
+                        results.append(res)
+                        
+                    except Exception as e:
+                        st.error(f"❌ Benchmark failed for {dataset_name}: {e}")
+                        logging.exception("Benchmark failed")
+                    finally:
+                        sys.stdout = old_stdout
+                        sys.stderr = old_stderr
+                    
+                    bench_elapsed = _time.perf_counter() - bench_start
+                    
+                    # Show the final captured output in an expander
+                    final_output = capture.get_text()
+                    
+                    st.success(f"✅ **{dataset_name}** completed in {bench_elapsed:.1f}s")
+                    
+                    if res:
+                        with st.expander(f"📋 Details: {dataset_name}", expanded=True):
+                            # Show the CLI output
+                            st.code(final_output, language=None)
                             
-                            # Show immediate stats for this dataset
-                            with st.expander(f"Details: {dataset_name}", expanded=True):
-                                c1, c2, c3 = st.columns(3)
-                                c1.metric("Images", f"{res['num_images']:,}")
-                                c2.metric("Ingestion Rate", f"{res['ingest_throughput_ips']:.1f} img/s")
-                                c3.metric("Search Latency (P50)", f"{res['query_p50_ms']:.2f} ms")
-                                
-                                st.markdown("**Sample Search:**")
-                                st.write(f"Query: *{res['sample_query']}*")
-                                st.json(res['sample_results'])
-
-                        except Exception as e:
-                            st.error(f"Benchmark failed for {dataset_name}: {e}")
-                            logging.exception("Benchmark failed")
+                            st.divider()
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Images", f"{res['num_images']:,}")
+                            c2.metric("Throughput", f"{res['ingest_throughput_ips']:.1f} img/s")
+                            c3.metric("P50 Latency", f"{res['query_p50_ms']:.2f} ms")
+                            c4.metric("DB Size", f"{res['db_size_mb']:.1f} MB")
 
                 progress_bar.progress(1.0)
-                status_text.markdown("**All benchmarks completed!**")
+                status_text.markdown("### ✅ All benchmarks completed!")
+                console_box.empty()
                 
-                # --- Aggregate Results ---
+                # ── Aggregate Results ──
                 if results:
                     st.divider()
                     st.subheader("Results Comparison")
