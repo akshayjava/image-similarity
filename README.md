@@ -105,6 +105,14 @@ python main.py download --dataset cifar10 --dest ./data
 python main.py demo --dataset cifar10 --query "airplane" --top-k 5
 ```
 
+### Graphical User Interface (GUI)
+
+Run the Streamlit app for an interactive search experience:
+
+```sh
+streamlit run app.py
+```
+
 ### Run benchmarks
 
 ```sh

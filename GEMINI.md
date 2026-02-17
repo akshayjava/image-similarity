@@ -53,6 +53,7 @@ A high-performance similarity search engine that runs entirely on the local mach
 ```
 image-similarity/
 ├── main.py                  # CLI entry point
+├── app.py                   # Streamlit GUI
 ├── similarity_engine.py     # Core engine (LanceDB + CLIP)
 ├── ingestion.py             # Parallel ingestion pipeline
 ├── datasets.py              # Benchmark dataset downloader
@@ -88,6 +89,9 @@ python main.py download --dataset cifar10 --dest ./data
 
 # One-shot demo: download → ingest → search
 python main.py demo --dataset cifar10 --query "airplane" --top-k 5
+
+# Graphical User Interface
+streamlit run app.py
 ```
 
 ### Current Status
