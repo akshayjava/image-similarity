@@ -233,7 +233,7 @@ def _show_db_preview(engine, label="Database Preview", n=8):
             cols = st.columns(min(len(valid), 8))
             for j, path in enumerate(valid[:8]):
                 with cols[j]:
-                    st.image(Image.open(path), use_column_width=True)
+                    st.image(Image.open(path), use_container_width=True)
                     st.caption(f"`{Path(path).name}`")
     except Exception:
         pass
@@ -291,7 +291,7 @@ def render_tools_page(engine):
                                 for ci, path in enumerate([d["pair"][0], d["pair"][1]]):
                                     with [c1, c2][ci]:
                                         if os.path.exists(path):
-                                            st.image(Image.open(path), use_column_width=True)
+                                            st.image(Image.open(path), use_container_width=True)
                                         st.caption(f"`{Path(path).name}`")
                         if len(dups) > 20:
                             st.info(f"Showing first 20 of {len(dups)} pairs.")
@@ -345,7 +345,7 @@ def render_tools_page(engine):
                             for j, path in enumerate(paths[:6]):
                                 with cols[j]:
                                     if os.path.exists(path):
-                                        st.image(Image.open(path), use_column_width=True)
+                                        st.image(Image.open(path), use_container_width=True)
                                     st.caption(f"`{Path(path).name}`")
                             if len(paths) > 6:
                                 st.caption(f"... and {len(paths) - 6} more")
@@ -532,7 +532,7 @@ def render_search_page(engine, top_k):
                             # Verify path exists
                             if os.path.exists(path):
                                 img = Image.open(path)
-                                st.image(img, use_column_width=True)
+                                st.image(img, use_container_width=True)
                                 st.caption(f"**{score:.4f}**\n`{Path(path).name}`")
                             else:
                                 st.error(f"File not found: {path}")
