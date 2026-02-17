@@ -1,0 +1,41 @@
+[
+  {
+    "dataset": "cifar10",
+    "description": "CIFAR-10 \u2014 60,000 images (32\u00d732), 10 classes",
+    "num_images": 60000,
+    "dataset_size_mb": 52.7,
+    "download_time_s": 21.0,
+    "indexed": 60000,
+    "errors": 0,
+    "ingest_time_s": 308.6,
+    "ingest_throughput_ips": 194.4,
+    "db_size_mb": 132.2,
+    "query_mean_ms": 43.14,
+    "query_p50_ms": 32.69,
+    "query_p95_ms": 38.04,
+    "query_p99_ms": 294.41,
+    "sample_query": "airplane",
+    "sample_results": [
+      {
+        "id": "/var/folders/tw/swzhw_h91ygf_4fvk9p14qm00000gn/T/bench_data_vk7tex34/cifar10/airplane/train_10151.jpg",
+        "distance": 0.6805
+      },
+      {
+        "id": "/var/folders/tw/swzhw_h91ygf_4fvk9p14qm00000gn/T/bench_data_vk7tex34/cifar10/airplane/train_40317.jpg",
+        "distance": 0.6807
+      },
+      {
+        "id": "/var/folders/tw/swzhw_h91ygf_4fvk9p14qm00000gn/T/bench_data_vk7tex34/cifar10/airplane/train_11838.jpg",
+        "distance": 0.6827
+      },
+      {
+        "id": "/var/folders/tw/swzhw_h91ygf_4fvk9p14qm00000gn/T/bench_data_vk7tex34/cifar10/airplane/train_38224.jpg",
+        "distance": 0.6844
+      },
+      {
+        "id": "/var/folders/tw/swzhw_h91ygf_4fvk9p14qm00000gn/T/bench_data_vk7tex34/cifar10/airplane/train_24420.jpg",
+        "distance": 0.687
+      }
+    ]
+  }
+]
