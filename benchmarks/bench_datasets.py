@@ -83,6 +83,7 @@ def benchmark_dataset(
     num_io_threads: int = 8,
     num_queries: int = 50,
     top_k: int = 10,
+    progress_callback=None,
 ) -> dict:
     """Run a full benchmark on a single dataset.
 
@@ -99,6 +100,10 @@ def benchmark_dataset(
     # ------------------------------------------------------------------
     # Step 1: Download
     # ------------------------------------------------------------------
+    # Step 1: Download
+    # ------------------------------------------------------------------
+    if progress_callback:
+        progress_callback(f"Downloading {dataset_name}...", 0.1)
     print(f"\n  [1/4] Downloading {dataset_name}...")
     t0 = time.perf_counter()
     export_path = download_dataset(dataset_name, dest_dir=data_dir)
@@ -115,6 +120,10 @@ def benchmark_dataset(
     # ------------------------------------------------------------------
     # Step 2: Ingest
     # ------------------------------------------------------------------
+    # Step 2: Ingest
+    # ------------------------------------------------------------------
+    if progress_callback:
+        progress_callback(f"Ingesting {dataset_name}...", 0.3)
     print(f"  [2/4] Ingesting with CLIP...")
     engine = SimilarityEngine(db_path=db_path)
 
@@ -140,6 +149,10 @@ def benchmark_dataset(
     # ------------------------------------------------------------------
     # Step 3: Search latency
     # ------------------------------------------------------------------
+    # Step 3: Search latency
+    # ------------------------------------------------------------------
+    if progress_callback:
+        progress_callback(f"Measuring search latency...", 0.8)
     print(f"  [3/4] Measuring search latency ({num_queries} queries)...")
     queries = SAMPLE_QUERIES.get(dataset_name, ["object"])
 
@@ -162,6 +175,10 @@ def benchmark_dataset(
     # ------------------------------------------------------------------
     # Step 4: Sample results (qualitative)
     # ------------------------------------------------------------------
+    # Step 4: Sample results (qualitative)
+    # ------------------------------------------------------------------
+    if progress_callback:
+        progress_callback(f"Running sample queries...", 0.95)
     print(f"  [4/4] Sample search results:")
     sample_query = queries[0]
     results = engine.search(query=sample_query, top_k=5)

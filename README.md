@@ -113,6 +113,10 @@ Run the Streamlit app for an interactive search experience:
 streamlit run app.py
 ```
 
+![GUI Search](gui_search.png)
+![GUI Benchmarks](gui_benchmarks.png)
+![GUI Progress](gui_progress.png)
+
 ### Run benchmarks
 
 ```sh

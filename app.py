@@ -162,6 +162,13 @@ def render_benchmarks_page():
                         # We could redirect stdout to a StringIO if we want to show logs.
                         
                         try:
+                            def progress_cb(msg, p):
+                                # p is 0.0-1.0 within this dataset
+                                # global progress = (i + p) / total_steps
+                                global_p = min((i + p) / total_steps, 0.99)
+                                progress_bar.progress(global_p)
+                                status_text.markdown(f"**{dataset_name}: {msg}**")
+
                             res = benchmark_dataset(
                                 dataset_name,
                                 data_dir=data_dir,
@@ -170,6 +177,7 @@ def render_benchmarks_page():
                                 num_io_threads=workers,
                                 num_queries=50,
                                 top_k=10,
+                                progress_callback=progress_cb,
                             )
                             results.append(res)
                             st.success(f"✅ {dataset_name} completed!")
