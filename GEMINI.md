@@ -55,6 +55,7 @@ image-similarity/
 ├── main.py                  # CLI entry point
 ├── similarity_engine.py     # Core engine (LanceDB + CLIP)
 ├── ingestion.py             # Parallel ingestion pipeline
+├── datasets.py              # Benchmark dataset downloader
 ├── requirements.txt         # Python dependencies
 ├── tests/
 │   └── test_engine.py       # Unit tests
@@ -80,6 +81,13 @@ python main.py create-index
 
 # Show stats
 python main.py stats
+
+# Download benchmark datasets
+python main.py download --list
+python main.py download --dataset cifar10 --dest ./data
+
+# One-shot demo: download → ingest → search
+python main.py demo --dataset cifar10 --query "airplane" --top-k 5
 ```
 
 ### Current Status

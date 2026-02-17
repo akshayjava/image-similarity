@@ -7,6 +7,8 @@ Commands:
     search        Search by image path or text query.
     create-index  Build an IVF-PQ index for fast ANN search.
     stats         Show table statistics.
+    download      Download a standard benchmark dataset.
+    demo          Download, ingest, and search a benchmark dataset (one-shot).
 """
 
 import argparse
@@ -57,6 +59,65 @@ def cmd_stats(args):
     print(json.dumps(stats, indent=2))
 
 
+def cmd_download(args):
+    from datasets import download_dataset, list_datasets, AVAILABLE_DATASETS
+
+    if args.list:
+        print(list_datasets())
+        return
+
+    if not args.dataset:
+        print("Error: --dataset is required. Use --list to see available datasets.")
+        sys.exit(1)
+
+    print(f"Downloading '{args.dataset}' to {args.dest}...")
+    export_path = download_dataset(args.dataset, dest_dir=args.dest)
+    print(f"\nDataset exported to: {export_path}")
+    print(f"\nTo ingest, run:")
+    print(f"  python main.py ingest --data-dir {export_path}")
+
+
+def cmd_demo(args):
+    from datasets import download_dataset, AVAILABLE_DATASETS
+
+    dataset_name = args.dataset
+    if dataset_name not in AVAILABLE_DATASETS:
+        print(f"Error: Unknown dataset '{dataset_name}'.")
+        print(f"Available: {list(AVAILABLE_DATASETS.keys())}")
+        sys.exit(1)
+
+    info = AVAILABLE_DATASETS[dataset_name]
+    print(f"\n{'='*60}")
+    print(f"  Demo: {info['description']}")
+    print(f"{'='*60}\n")
+
+    # Step 1: Download
+    print("[1/3] Downloading dataset...")
+    export_path = download_dataset(dataset_name, dest_dir=args.dest)
+    print(f"  → Exported to: {export_path}\n")
+
+    # Step 2: Ingest
+    print("[2/3] Ingesting into vector store...")
+    engine = SimilarityEngine(db_path=args.db_path)
+    stats = engine.index(
+        data_dir=export_path,
+        batch_size=args.batch_size,
+        num_io_threads=args.workers,
+    )
+    print(f"  → Indexed: {stats['total_indexed']:,} images, "
+          f"Errors: {stats['total_errors']}\n")
+
+    # Step 3: Search
+    print(f"[3/3] Searching for: '{args.query}'\n")
+    results = engine.search(query=args.query, top_k=args.top_k)
+
+    print(f"Top {len(results)} results:\n")
+    for rank, (item_id, score) in enumerate(results, 1):
+        print(f"  {rank}. {item_id}")
+        print(f"     distance: {score:.6f}")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="image-similarity",
@@ -95,6 +156,23 @@ def main():
     # --- stats ---
     p_stats = subparsers.add_parser("stats", help="Show table statistics")
     p_stats.set_defaults(func=cmd_stats)
+
+    # --- download ---
+    p_dl = subparsers.add_parser("download", help="Download a benchmark dataset")
+    p_dl.add_argument("--dataset", help="Dataset name (cifar10, stl10, flowers102, caltech101)")
+    p_dl.add_argument("--dest", default="./data", help="Destination directory (default: ./data)")
+    p_dl.add_argument("--list", action="store_true", help="List available datasets")
+    p_dl.set_defaults(func=cmd_download)
+
+    # --- demo ---
+    p_demo = subparsers.add_parser("demo", help="Download, ingest, and search (one-shot)")
+    p_demo.add_argument("--dataset", required=True, help="Dataset name")
+    p_demo.add_argument("--query", default="airplane", help="Text query (default: airplane)")
+    p_demo.add_argument("--dest", default="./data", help="Data directory (default: ./data)")
+    p_demo.add_argument("--top-k", type=int, default=5, help="Number of results")
+    p_demo.add_argument("--batch-size", type=int, default=256, help="Ingestion batch size")
+    p_demo.add_argument("--workers", type=int, default=8, help="I/O threads")
+    p_demo.set_defaults(func=cmd_demo)
 
     args = parser.parse_args()
 
