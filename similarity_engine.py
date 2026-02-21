@@ -122,7 +122,7 @@ class SimilarityEngine:
         num_io_threads: int,
         prefetch_size: int = 2,
     ) -> Generator:
-        """Yield (tensors, ids, errors) while loading the next batch in the background.
+        """Yield (tensors, ids, errors, metadata) while loading the next batch in the background.
 
         A producer thread fills a bounded queue so disk I/O overlaps with GPU
         inference — effectively doubling throughput on I/O-bound workloads.
@@ -132,10 +132,10 @@ class SimilarityEngine:
 
         def _producer():
             for batch_paths in iterator:
-                tensors, ids, errors = load_and_preprocess(
+                tensors, ids, errors, metadata = load_and_preprocess(
                     batch_paths, self._preprocess, num_threads=num_io_threads,
                 )
-                q.put((tensors, ids, errors))
+                q.put((tensors, ids, errors, metadata))
             q.put(_SENTINEL)
 
         t = threading.Thread(target=_producer, daemon=True)
@@ -157,12 +157,13 @@ class SimilarityEngine:
         batch_size: int = 256,
         num_io_threads: int = 8,
         table_name: str = DEFAULT_TABLE_NAME,
+        incremental: bool = True,
     ) -> dict:
         """Ingest images from a directory into the vector store.
 
         Uses a parallel pipeline:
           1. Lazy directory walk (ImageBatchIterator)
-          2. Thread-pooled image loading & preprocessing
+          2. Thread-pooled image loading & preprocessing (with metadata extraction)
           3. Batched CLIP inference
           4. Arrow-backed writes to LanceDB
 
@@ -171,13 +172,49 @@ class SimilarityEngine:
             batch_size: Images per batch.
             num_io_threads: Number of I/O threads for image loading.
             table_name: LanceDB table name.
+            incremental: If True (default), skip images already present in the DB.
+                         Set to False to re-index everything from scratch.
 
         Returns:
-            dict with keys: total_indexed, total_errors, total_batches.
+            dict with keys: total_indexed, total_errors, total_batches, total_skipped.
         """
         self._ensure_model()
 
+        # --- Incremental mode: load existing IDs to skip ---
+        existing_ids: set = set()
+        store_metadata = True  # will be set False if existing table lacks metadata cols
+        if table_name in self.db.table_names():
+            existing_table = self.db.open_table(table_name)
+            if incremental:
+                arrow_id_col = existing_table.to_arrow(columns=["id"])
+                existing_ids = set(arrow_id_col.column("id").to_pylist())
+                logger.info(
+                    "Incremental mode: %d images already indexed, will skip them",
+                    len(existing_ids),
+                )
+            # Detect whether existing table already has metadata columns
+            try:
+                store_metadata = "width" in existing_table.schema.names
+            except Exception:
+                store_metadata = False
+
+        total_skipped = 0
+
         iterator = ImageBatchIterator(data_dir, batch_size=batch_size)
+
+        # Wrap iterator to filter out already-indexed paths
+        def _incremental_iter(it):
+            nonlocal total_skipped
+            for batch in it:
+                if existing_ids:
+                    filtered = [p for p in batch if str(p) not in existing_ids]
+                    total_skipped += len(batch) - len(filtered)
+                    if not filtered:
+                        continue
+                    yield filtered
+                else:
+                    yield batch
+
         total_indexed = 0
         total_errors = 0
         total_batches = 0
@@ -187,7 +224,9 @@ class SimilarityEngine:
 
         # _prefetch_batches runs I/O in a background thread so disk reads
         # overlap with GPU inference instead of executing serially.
-        for tensors, ids, errors in self._prefetch_batches(iterator, num_io_threads):
+        for tensors, ids, errors, metadata in self._prefetch_batches(
+            _incremental_iter(iterator), num_io_threads
+        ):
             total_errors += len(errors)
 
             if not tensors:
@@ -196,11 +235,21 @@ class SimilarityEngine:
             # Embed
             embeddings = embed_batch(tensors, self._model, self.device)
 
-            # Build Arrow table and write to LanceDB
-            data = pa.table({
-                "id": ids,
-                "vector": embeddings.tolist(),
-            })
+            # Build Arrow table — include metadata columns for new tables
+            if store_metadata:
+                data = pa.table({
+                    "id": ids,
+                    "vector": embeddings.tolist(),
+                    "width": pa.array([m["width"] for m in metadata], type=pa.int32()),
+                    "height": pa.array([m["height"] for m in metadata], type=pa.int32()),
+                    "file_size": pa.array([m["file_size"] for m in metadata], type=pa.int64()),
+                    "file_mtime": pa.array([m["file_mtime"] for m in metadata], type=pa.float64()),
+                })
+            else:
+                data = pa.table({
+                    "id": ids,
+                    "vector": embeddings.tolist(),
+                })
 
             if table is None:
                 if table_name in self.db.table_names():
@@ -221,6 +270,7 @@ class SimilarityEngine:
             "total_indexed": total_indexed,
             "total_errors": total_errors,
             "total_batches": total_batches,
+            "total_skipped": total_skipped,
         }
         logger.info("Ingestion complete: %s", stats)
         return stats
@@ -267,6 +317,7 @@ class SimilarityEngine:
         query: Union[str, Path, np.ndarray],
         top_k: int = 5,
         table_name: str = DEFAULT_TABLE_NAME,
+        where: Optional[str] = None,
     ) -> List[Tuple[str, float]]:
         """Search for the most similar items to a query.
 
@@ -277,6 +328,10 @@ class SimilarityEngine:
                 - np.ndarray → raw embedding vector
             top_k: Number of results to return.
             table_name: LanceDB table to search.
+            where: Optional SQL WHERE clause to pre-filter candidates before
+                   vector search (e.g. ``"width > 1920 AND height > 1080"``).
+                   Only meaningful when the table was ingested with metadata
+                   (width, height, file_size, file_mtime columns).
 
         Returns:
             List of (id, score) tuples, sorted by similarity (highest first).
@@ -285,12 +340,14 @@ class SimilarityEngine:
         query_vector = self._encode_query(query)
 
         table = self.db.open_table(table_name)
-        results = (
+        q = (
             table.search(query_vector.tolist())
             .metric("cosine")
             .limit(top_k)
-            .to_list()
         )
+        if where:
+            q = q.where(where)
+        results = q.to_list()
 
         return [(r["id"], r.get("_distance", 0.0)) for r in results]
 

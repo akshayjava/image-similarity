@@ -65,7 +65,7 @@ def load_and_preprocess(
     paths: List[Path],
     transform,
     num_threads: int = 8,
-) -> Tuple[List[torch.Tensor], List[str], List[str]]:
+) -> Tuple[List[torch.Tensor], List[str], List[str], List[dict]]:
     """Thread-pooled image loading, decoding, and preprocessing.
 
     Args:
@@ -74,43 +74,54 @@ def load_and_preprocess(
         num_threads: Number of I/O threads.
 
     Returns:
-        Tuple of (preprocessed_tensors, valid_ids, error_paths).
+        Tuple of (preprocessed_tensors, valid_ids, error_paths, metadata_list).
         - preprocessed_tensors: Successfully loaded and transformed images.
         - valid_ids: Corresponding string IDs (absolute path).
         - error_paths: Paths that failed to load.
+        - metadata_list: Per-image dicts with width, height, file_size, file_mtime.
     """
-    results: List[Tuple[Optional[torch.Tensor], str]] = [None] * len(paths)
+    results: List[Tuple[Optional[torch.Tensor], str, Optional[dict]]] = [None] * len(paths)
     errors: List[str] = []
 
     def _load_single(idx: int, path: Path):
         try:
+            stat = path.stat()
             img = Image.open(path).convert("RGB")
+            width, height = img.size
             tensor = transform(img)
-            return idx, tensor, str(path)
+            meta = {
+                "width": width,
+                "height": height,
+                "file_size": stat.st_size,
+                "file_mtime": stat.st_mtime,
+            }
+            return idx, tensor, str(path), meta
         except Exception as e:
             logger.warning("Failed to load %s: %s", path, e)
-            return idx, None, str(path)
+            return idx, None, str(path), None
 
     with ThreadPoolExecutor(max_workers=num_threads) as pool:
         futures = {
             pool.submit(_load_single, i, p): i for i, p in enumerate(paths)
         }
         for future in as_completed(futures):
-            idx, tensor, path_str = future.result()
+            idx, tensor, path_str, meta = future.result()
             if tensor is not None:
-                results[idx] = (tensor, path_str)
+                results[idx] = (tensor, path_str, meta)
             else:
                 errors.append(path_str)
 
     # Filter out Nones (failed loads) while preserving order
     tensors = []
     ids = []
+    metadata_list = []
     for item in results:
         if item is not None:
             tensors.append(item[0])
             ids.append(item[1])
+            metadata_list.append(item[2])
 
-    return tensors, ids, errors
+    return tensors, ids, errors, metadata_list
 
 
 @torch.no_grad()

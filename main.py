@@ -25,13 +25,14 @@ def cmd_ingest(args):
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_io_threads=args.workers,
+        incremental=not args.force,
     )
     print(json.dumps(stats, indent=2))
 
 
 def cmd_search(args):
     engine = SimilarityEngine(db_path=args.db_path)
-    results = engine.search(query=args.query, top_k=args.top_k)
+    results = engine.search(query=args.query, top_k=args.top_k, where=args.filter)
 
     if args.json:
         print(json.dumps(
@@ -188,6 +189,10 @@ def main():
     p_ingest.add_argument("--data-dir", required=True, help="Root image directory")
     p_ingest.add_argument("--batch-size", type=int, default=256, help="Images per batch")
     p_ingest.add_argument("--workers", type=int, default=8, help="I/O threads")
+    p_ingest.add_argument(
+        "--force", action="store_true",
+        help="Re-index all images, ignoring already-indexed ones (disables incremental mode)",
+    )
     p_ingest.set_defaults(func=cmd_ingest)
 
     # --- search ---
@@ -195,6 +200,14 @@ def main():
     p_search.add_argument("--query", required=True, help="Image path or text query")
     p_search.add_argument("--top-k", type=int, default=5, help="Number of results")
     p_search.add_argument("--json", action="store_true", help="Output as JSON")
+    p_search.add_argument(
+        "--filter", default=None, metavar="EXPR",
+        help=(
+            "SQL WHERE expression to pre-filter candidates before vector search. "
+            "Requires metadata columns (available when DB was ingested without --force after this update). "
+            "Example: \"width > 1920 AND file_size < 5000000\""
+        ),
+    )
     p_search.set_defaults(func=cmd_search)
 
     # --- create-index ---
