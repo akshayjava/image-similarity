@@ -92,7 +92,12 @@ def render_manage_page():
         cn_name = st.text_input("New DB Name", placeholder="e.g., MyPhotos_DB")
         cn_source = st.text_input("Source Image Directory", placeholder="/path/to/images")
         cn_dest = st.text_input("Destination DB Path (Optional)", placeholder="Leave empty to use ./dbs/<name>")
-        
+        cn_incremental = st.checkbox(
+            "Incremental (skip already-indexed images)",
+            value=True,
+            help="Only index images not yet in the database. Uncheck to re-index everything.",
+        )
+
         if st.button("Ingest & Create"):
             if cn_name and cn_source:
                 if not os.path.exists(cn_source):
@@ -100,10 +105,10 @@ def render_manage_page():
                 else:
                     target_db_path = cn_dest if cn_dest else f"./dbs/{cn_name}"
                     os.makedirs(target_db_path, exist_ok=True)
-                    
+
                     import sys, io
                     console_box = st.empty()
-                    
+
                     class _IngestCapture(io.TextIOBase):
                         def __init__(self, el, max_lines=30):
                             self._lines, self._cur, self._el, self._max = [], "", el, max_lines
@@ -119,19 +124,23 @@ def render_manage_page():
                             self._el.code(out, language=None)
                             return len(t)
                         def flush(self): pass
-                    
+
                     cap = _IngestCapture(console_box)
                     old_out, old_err = sys.stdout, sys.stderr
                     try:
                         sys.stdout = cap
                         sys.stderr = cap
                         ingest_engine = SimilarityEngine(db_path=target_db_path)
-                        stats = ingest_engine.index(cn_source)
+                        stats = ingest_engine.index(cn_source, incremental=cn_incremental)
                     finally:
                         sys.stdout = old_out
                         sys.stderr = old_err
-                        
-                    st.success(f"✅ Ingestion complete! {stats['total_indexed']} images indexed.")
+
+                    skipped = stats.get("total_skipped", 0)
+                    msg = f"✅ Ingestion complete! {stats['total_indexed']} images indexed."
+                    if skipped:
+                        msg += f" ({skipped} already-indexed images skipped)"
+                    st.success(msg)
                     db_config.add_database(cn_name, target_db_path)
                     st.success(f"Database '{cn_name}' registered. Switch to it in the sidebar.")
                     time.sleep(1)
@@ -485,7 +494,7 @@ def render_search_page(engine, top_k):
     st.divider()
 
     query = None
-    
+
     if search_mode == "Text Query":
         col1, col2 = st.columns([3, 1])
         with col1:
@@ -494,30 +503,52 @@ def render_search_page(engine, top_k):
             st.write("") # spacer
             st.write("")
             search_btn = st.button("Search", type="primary", use_container_width=True)
-            
+
         if search_btn and text_input:
             query = text_input
-            
+
     elif search_mode == "Image Query":
         uploaded_file = st.file_uploader("Upload an image to find similar ones:", type=["png", "jpg", "jpeg", "webp"])
         if uploaded_file:
             # Display uploaded image
             image = Image.open(uploaded_file)
             st.image(image, caption="Query Image", width=250)
-            
+
             import tempfile
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
                 image.save(tmp_file, format="JPEG")
                 query = tmp_file.name
-    
+
+    # --- Metadata filter (only shown when DB has metadata columns) ---
+    filter_expr = None
+    try:
+        tbl = engine.db.open_table("vectors")
+        has_metadata = "width" in tbl.schema.names
+    except Exception:
+        has_metadata = False
+
+    if has_metadata:
+        with st.expander("Filter by metadata (optional)", expanded=False):
+            st.caption(
+                "Pre-filter candidates using image metadata before vector search. "
+                "Available columns: `width`, `height`, `file_size` (bytes), `file_mtime` (Unix timestamp)."
+            )
+            filter_input = st.text_input(
+                "WHERE expression",
+                placeholder='e.g., width > 1920 AND file_size < 5000000',
+                key="search_filter",
+            )
+            if filter_input.strip():
+                filter_expr = filter_input.strip()
+
     # --- Perform Search ---
     if query:
         st.markdown(f"### Results")
-        
+
         with st.spinner("Searching..."):
             try:
                 start_time = time.perf_counter()
-                results = engine.search(query, top_k=top_k)
+                results = engine.search(query, top_k=top_k, where=filter_expr)
                 elapsed = (time.perf_counter() - start_time) * 1000
                 
                 st.caption(f"Found {len(results)} results in {elapsed:.2f} ms")
