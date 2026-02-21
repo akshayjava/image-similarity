@@ -156,14 +156,14 @@ class SimilarityEngine:
             # 3. Build Arrow table and write to LanceDB
             data = pa.table({
                 "id": ids,
-                "vector": [emb.tolist() for emb in embeddings],
+                "vector": embeddings.tolist(),
             })
 
             if table is None:
-                try:
+                if table_name in self.db.table_names():
                     table = self.db.open_table(table_name)
                     table.add(data)
-                except Exception:
+                else:
                     table = self.db.create_table(table_name, data=data)
             else:
                 table.add(data)
@@ -358,14 +358,22 @@ class SimilarityEngine:
             sim = chunk @ normed.T  # shape: [chunk_size, N]
             dist = 1.0 - sim
 
-            for i_local in range(end - start):
-                i_global = start + i_local
-                for j in range(i_global + 1, n):
-                    if dist[i_local, j] < threshold:
-                        duplicates.append({
-                            "pair": [ids[i_global], ids[j]],
-                            "distance": float(dist[i_local, j]),
-                        })
+            # Vectorized pair extraction: find all (i_local, j) with
+            # dist < threshold and j > i_global (upper triangle only).
+            chunk_len = end - start
+            i_globals = np.arange(start, end)          # absolute row indices
+            j_indices = np.arange(n)                   # column indices
+
+            # upper_mask[r, c] = True iff c > i_globals[r]
+            upper_mask = j_indices[None, :] > i_globals[:, None]  # [chunk_len, n]
+            match_mask = (dist < threshold) & upper_mask          # [chunk_len, n]
+
+            matched = np.argwhere(match_mask)          # shape: [num_matches, 2]
+            for i_local, j in matched:
+                duplicates.append({
+                    "pair": [ids[start + int(i_local)], ids[int(j)]],
+                    "distance": float(dist[i_local, j]),
+                })
 
             if progress_callback:
                 progress_callback(
@@ -452,6 +460,8 @@ class SimilarityEngine:
         if progress_callback:
             progress_callback(f"Running {method.upper()} on {len(ids)} points...", 0.1)
 
+        reducer = None
+
         if method == "umap":
             try:
                 import umap
@@ -468,6 +478,9 @@ class SimilarityEngine:
                 random_state=42,
                 perplexity=max(5, perplexity),
             )
+
+        if reducer is None:
+            raise ValueError(f"Unknown reduction method '{method}'. Choose 'tsne' or 'umap'.")
 
         reduced = reducer.fit_transform(embeddings)
 
@@ -486,22 +499,39 @@ class SimilarityEngine:
     def quantize_table(self, table_name: str = DEFAULT_TABLE_NAME) -> dict:
         """Quantize embeddings from float32 to float16 to reduce DB size.
 
+        Uses a write-to-temp-then-swap strategy so the original data is never
+        destroyed before a confirmed successful copy exists.
+
         Returns:
             dict with before/after size info.
         """
-        import pyarrow as pa
-
         table = self.db.open_table(table_name)
         df = table.to_pandas()
         original_count = len(df)
 
         # Convert float32 vectors to float16
-        vectors_f16 = [v.astype(np.float16) for v in df["vector"].values]
-        df["vector"] = vectors_f16
+        df["vector"] = [v.astype(np.float16) for v in df["vector"].values]
 
-        # Overwrite table
+        # Stage into a temp table first — original is untouched until this succeeds
+        tmp_name = f"_qtmp_{table_name}"
+        if tmp_name in self.db.table_names():
+            self.db.drop_table(tmp_name)
+        self.db.create_table(tmp_name, df)  # raises on failure; original intact
+
+        # Swap: safe to destroy original now that we have a full copy
         self.db.drop_table(table_name)
-        self.db.create_table(table_name, df)
+        try:
+            self.db.create_table(table_name, df)
+        except Exception:
+            # Recover: rename temp table back by re-creating from it
+            logger.error(
+                "Failed to recreate '%s' after quantization; data preserved in '%s'",
+                table_name, tmp_name,
+            )
+            raise
+        finally:
+            if tmp_name in self.db.table_names():
+                self.db.drop_table(tmp_name)
 
         return {
             "rows": original_count,

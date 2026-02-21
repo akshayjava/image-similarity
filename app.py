@@ -221,9 +221,12 @@ def _show_db_preview(engine, label="Database Preview", n=8):
         if count == 0:
             return
         import random
-        # Sample random indices
         sample_n = min(n, count)
-        df = table.to_pandas()
+        # Read only a small head of the table instead of loading all rows —
+        # avoids an expensive full scan on large databases.
+        head_n = min(sample_n * 8, count)
+        raw = table.head(head_n)
+        df = raw.to_pandas() if hasattr(raw, "to_pandas") else pd.DataFrame(raw)
         sample = df.sample(n=sample_n, random_state=random.randint(0, 9999))
         paths = sample["id"].tolist()
         valid = [p for p in paths if os.path.exists(p)]
@@ -492,7 +495,7 @@ def render_search_page(engine, top_k):
             st.write("")
             search_btn = st.button("Search", type="primary", use_container_width=True)
             
-        if text_input and (search_btn or text_input):
+        if search_btn and text_input:
             query = text_input
             
     elif search_mode == "Image Query":
@@ -544,7 +547,7 @@ def render_search_page(engine, top_k):
     if search_mode == "Image Query" and query and isinstance(query, str) and os.path.exists(query) and "tmp" in query:
         try:
             os.remove(query)
-        except:
+        except OSError:
             pass
 
 def render_benchmarks_page():
