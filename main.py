@@ -220,6 +220,23 @@ def cmd_export_onnx(args):
     print(f"ONNX models exported to {args.output_dir}")
 
 
+def cmd_serve(args):
+    try:
+        import uvicorn
+        import server as _server
+    except ImportError as e:
+        print(f"Error: missing dependency — {e}")
+        print("Install with: pip install fastapi 'uvicorn[standard]'")
+        sys.exit(1)
+
+    print(f"Loading engine from '{args.db_path}'...")
+    _server._init_engine(args.db_path)
+    print(f"Engine ready.")
+    print(f"Starting API server  →  http://{args.host}:{args.port}")
+    print(f"Interactive docs     →  http://{args.host}:{args.port}/docs")
+    uvicorn.run(_server.app, host=args.host, port=args.port)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="image-similarity",
@@ -340,6 +357,20 @@ def main():
     p_onnx = subparsers.add_parser("export-onnx", help="Export CLIP to ONNX format")
     p_onnx.add_argument("--output-dir", default="./models", help="Output directory (default: ./models)")
     p_onnx.set_defaults(func=cmd_export_onnx)
+
+    # --- serve ---
+    p_serve = subparsers.add_parser(
+        "serve", help="Start the REST API server (FastAPI + uvicorn)"
+    )
+    p_serve.add_argument(
+        "--host", default="127.0.0.1",
+        help="Bind host (default: 127.0.0.1; use 0.0.0.0 to expose on the network)",
+    )
+    p_serve.add_argument(
+        "--port", type=int, default=8000,
+        help="Port to listen on (default: 8000)",
+    )
+    p_serve.set_defaults(func=cmd_serve)
 
     args = parser.parse_args()
 
