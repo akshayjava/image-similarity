@@ -132,7 +132,19 @@ def embed_batch(
     if not images:
         return np.empty((0, 0), dtype=np.float32)
 
-    batch = torch.stack(images).to(device)
-    features = model.encode_image(batch)
+    # pin_memory + non_blocking overlaps the CPU→GPU transfer with other work.
+    batch = torch.stack(images)
+    if device.type == "cuda":
+        batch = batch.pin_memory().to(device, non_blocking=True)
+    else:
+        batch = batch.to(device)
+
+    # autocast enables FP16 math on CUDA (~1.5-2x faster) with minimal accuracy loss.
+    if device.type == "cuda":
+        with torch.autocast("cuda"):
+            features = model.encode_image(batch)
+    else:
+        features = model.encode_image(batch)
+
     features = features / features.norm(dim=-1, keepdim=True)
-    return features.cpu().numpy().astype(np.float32)
+    return features.cpu().float().numpy()

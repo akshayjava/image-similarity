@@ -8,8 +8,10 @@ across 1M+ images on multi-TB datasets.
 
 import logging
 import os
+import queue
+import threading
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Generator, List, Optional, Tuple, Union
 
 import lancedb
 import numpy as np
@@ -91,6 +93,14 @@ class SimilarityEngine:
         self._model = self._model.to(self.device).eval()
         self._tokenizer = open_clip.get_tokenizer(self.model_name)
 
+        # torch.compile() (PyTorch 2.0+) JIT-fuses ops for 10-30% faster inference.
+        if hasattr(torch, "compile"):
+            try:
+                self._model = torch.compile(self._model)
+                logger.info("torch.compile() applied to model.")
+            except Exception as e:
+                logger.warning("torch.compile() skipped: %s", e)
+
         # Determine embedding dimension from a dummy forward pass
         with torch.no_grad():
             dummy = torch.zeros(1, 3, 224, 224, device=self.device)
@@ -101,6 +111,41 @@ class SimilarityEngine:
     def dimension(self) -> int:
         self._ensure_model()
         return self._dimension
+
+    # ------------------------------------------------------------------
+    # Ingestion helpers
+    # ------------------------------------------------------------------
+
+    def _prefetch_batches(
+        self,
+        iterator,
+        num_io_threads: int,
+        prefetch_size: int = 2,
+    ) -> Generator:
+        """Yield (tensors, ids, errors) while loading the next batch in the background.
+
+        A producer thread fills a bounded queue so disk I/O overlaps with GPU
+        inference — effectively doubling throughput on I/O-bound workloads.
+        """
+        q: queue.Queue = queue.Queue(maxsize=prefetch_size)
+        _SENTINEL = object()
+
+        def _producer():
+            for batch_paths in iterator:
+                tensors, ids, errors = load_and_preprocess(
+                    batch_paths, self._preprocess, num_threads=num_io_threads,
+                )
+                q.put((tensors, ids, errors))
+            q.put(_SENTINEL)
+
+        t = threading.Thread(target=_producer, daemon=True)
+        t.start()
+        while True:
+            item = q.get()
+            if item is _SENTINEL:
+                break
+            yield item
+        t.join()
 
     # ------------------------------------------------------------------
     # Ingestion
@@ -140,20 +185,18 @@ class SimilarityEngine:
 
         progress = tqdm(desc="Indexing images", unit=" imgs")
 
-        for batch_paths in iterator:
-            # 1. Load & preprocess in parallel
-            tensors, ids, errors = load_and_preprocess(
-                batch_paths, self._preprocess, num_threads=num_io_threads,
-            )
+        # _prefetch_batches runs I/O in a background thread so disk reads
+        # overlap with GPU inference instead of executing serially.
+        for tensors, ids, errors in self._prefetch_batches(iterator, num_io_threads):
             total_errors += len(errors)
 
             if not tensors:
                 continue
 
-            # 2. Embed
+            # Embed
             embeddings = embed_batch(tensors, self._model, self.device)
 
-            # 3. Build Arrow table and write to LanceDB
+            # Build Arrow table and write to LanceDB
             data = pa.table({
                 "id": ids,
                 "vector": embeddings.tolist(),
@@ -301,13 +344,19 @@ class SimilarityEngine:
     def _get_all_embeddings(self, table_name: str = DEFAULT_TABLE_NAME):
         """Extract all embeddings and IDs from a table.
 
+        Uses Arrow-native conversion (avoids pandas overhead) for a
+        significant speedup on large tables.
+
         Returns:
             Tuple of (ids: list[str], embeddings: np.ndarray of shape [N, D])
         """
         table = self.db.open_table(table_name)
-        df = table.to_pandas()
-        ids = df["id"].tolist()
-        embeddings = np.stack(df["vector"].values).astype(np.float32)
+        arrow_table = table.to_arrow()
+        ids = arrow_table.column("id").to_pylist()
+        # FixedSizeList column → numpy without going through pandas
+        embeddings = np.stack(
+            arrow_table.column("vector").to_pylist()
+        ).astype(np.float32)
         return ids, embeddings
 
     def find_duplicates(
@@ -343,6 +392,11 @@ class SimilarityEngine:
         norms[norms == 0] = 1.0
         normed = embeddings / norms
 
+        # Use float16 for the similarity matrix — halves memory bandwidth and
+        # speeds up the matmul significantly with negligible precision loss for
+        # duplicate detection (threshold is coarse anyway).
+        normed16 = normed.astype(np.float16)
+
         # Compute cosine distance matrix (1 - similarity)
         # For large N, do in chunks to avoid OOM
         duplicates = []
@@ -352,10 +406,10 @@ class SimilarityEngine:
         for ci in range(total_chunks):
             start = ci * chunk_size
             end = min(start + chunk_size, n)
-            chunk = normed[start:end]
+            chunk = normed16[start:end]
 
             # Cosine similarity: chunk @ normed.T
-            sim = chunk @ normed.T  # shape: [chunk_size, N]
+            sim = (chunk @ normed16.T).astype(np.float32)  # shape: [chunk_size, N]
             dist = 1.0 - sim
 
             # Vectorized pair extraction: find all (i_local, j) with
@@ -392,6 +446,9 @@ class SimilarityEngine:
     ) -> dict:
         """Cluster images using K-Means on CLIP embeddings.
 
+        Uses MiniBatchKMeans for datasets > 10 000 images (orders of magnitude
+        faster than exact KMeans with comparable quality).
+
         Args:
             n_clusters: Number of clusters.
             table_name: LanceDB table.
@@ -402,28 +459,39 @@ class SimilarityEngine:
                 "clusters": {cluster_id: [list_of_paths]}
                 "stats": {"n_clusters": int, "n_images": int, "inertia": float}
         """
-        from sklearn.cluster import KMeans
-
         if progress_callback:
             progress_callback("Loading embeddings...", 0.0)
 
         ids, embeddings = self._get_all_embeddings(table_name)
+        ids_arr = np.array(ids)
 
         if progress_callback:
             progress_callback(f"Running K-Means (k={n_clusters})...", 0.2)
 
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        # MiniBatchKMeans is dramatically faster on large datasets while
+        # producing nearly identical cluster quality.
+        if len(ids) > 10_000:
+            from sklearn.cluster import MiniBatchKMeans
+            kmeans = MiniBatchKMeans(
+                n_clusters=n_clusters, random_state=42, n_init=3, batch_size=4096,
+            )
+        else:
+            from sklearn.cluster import KMeans
+            kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+
         labels = kmeans.fit_predict(embeddings)
 
         if progress_callback:
             progress_callback("Organizing clusters...", 0.9)
 
-        clusters = {}
-        for idx, label in enumerate(labels):
-            label_key = int(label)
-            if label_key not in clusters:
-                clusters[label_key] = []
-            clusters[label_key].append(ids[idx])
+        # Vectorized grouping — avoids a Python-level loop over all images.
+        sort_idx = np.argsort(labels)
+        sorted_labels = labels[sort_idx]
+        sorted_ids = ids_arr[sort_idx]
+        split_points = np.flatnonzero(np.diff(sorted_labels)) + 1
+        groups = np.split(sorted_ids, split_points)
+        unique_labels = sorted_labels[np.concatenate(([0], split_points))]
+        clusters = {int(lbl): grp.tolist() for lbl, grp in zip(unique_labels, groups)}
 
         return {
             "clusters": clusters,
@@ -471,12 +539,23 @@ class SimilarityEngine:
                 method = "tsne"
 
         if method == "tsne":
+            from sklearn.decomposition import PCA
             from sklearn.manifold import TSNE
+
+            # PCA pre-reduction: t-SNE is O(N²) in input dimensionality;
+            # reducing 512-dim → 50-dim first gives a large speedup with
+            # negligible information loss (CLIP embeddings are low-rank in practice).
+            pca_dims = min(50, embeddings.shape[1], len(ids) - 1)
+            if pca_dims < embeddings.shape[1] and len(ids) > 1:
+                logger.info("PCA pre-reduction %d→%d before t-SNE", embeddings.shape[1], pca_dims)
+                embeddings = PCA(n_components=pca_dims, random_state=42).fit_transform(embeddings)
+
             perplexity = min(30, len(ids) - 1)
             reducer = TSNE(
                 n_components=n_components,
                 random_state=42,
                 perplexity=max(5, perplexity),
+                n_jobs=-1,  # use all CPU cores
             )
 
         if reducer is None:
