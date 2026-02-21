@@ -394,6 +394,65 @@ class SimilarityEngine:
         except Exception as e:
             return {"table": table_name, "error": str(e)}
 
+    def delete(
+        self,
+        paths: List[str],
+        table_name: str = DEFAULT_TABLE_NAME,
+    ) -> dict:
+        """Remove specific images from the vector store by their file paths.
+
+        Args:
+            paths: List of absolute image paths to remove.
+            table_name: LanceDB table name.
+
+        Returns:
+            dict with key 'deleted' (number of rows removed).
+        """
+        if not paths:
+            return {"deleted": 0}
+
+        table = self.db.open_table(table_name)
+        before = table.count_rows()
+
+        # Build SQL IN clause; escape any single quotes in paths
+        quoted = ", ".join(f"'{p.replace(chr(39), chr(39) * 2)}'" for p in paths)
+        table.delete(f"id IN ({quoted})")
+
+        after = table.count_rows()
+        deleted = before - after
+        logger.info("Deleted %d rows from '%s'", deleted, table_name)
+        return {"deleted": deleted}
+
+    def delete_by_prefix(
+        self,
+        prefix: str,
+        table_name: str = DEFAULT_TABLE_NAME,
+    ) -> dict:
+        """Remove all images whose path starts with the given prefix.
+
+        Useful for removing an entire directory from the index without
+        rebuilding the database.
+
+        Args:
+            prefix: Path prefix to match (e.g. '/data/old_photos/').
+            table_name: LanceDB table name.
+
+        Returns:
+            dict with keys 'deleted' and 'prefix'.
+        """
+        table = self.db.open_table(table_name)
+        before = table.count_rows()
+
+        safe_prefix = prefix.replace("'", "''")
+        table.delete(f"id LIKE '{safe_prefix}%'")
+
+        after = table.count_rows()
+        deleted = before - after
+        logger.info(
+            "Deleted %d rows with prefix '%s' from '%s'", deleted, prefix, table_name
+        )
+        return {"deleted": deleted, "prefix": prefix}
+
     # ------------------------------------------------------------------
     # Advanced Analysis
     # ------------------------------------------------------------------

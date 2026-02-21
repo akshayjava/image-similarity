@@ -69,7 +69,7 @@ def render_manage_page():
 
     st.divider()
     
-    tab1, tab2, tab3 = st.tabs(["Add Existing", "Create New (Ingest)", "Create from Dataset"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Add Existing", "Create New (Ingest)", "Create from Dataset", "Delete Images"])
     
     with tab1:
         st.subheader("Add Existing Database")
@@ -220,6 +220,91 @@ def render_manage_page():
                 st.info("Switch to this database in the sidebar to search it.")
                 time.sleep(1)
                 st.rerun()
+
+    with tab4:
+        st.subheader("Delete Images from Active Database")
+        st.caption(
+            "Remove images from the vector store without rebuilding the database. "
+            "The active database is selected in the sidebar."
+        )
+
+        config = db_config.load_config()
+        databases = config.get("databases", {})
+        active_db_name = st.session_state.get("active_db", list(databases.keys())[0] if databases else "Default")
+        active_db_path = databases.get(active_db_name, "./lancedb")
+        st.info(f"Active database: **{active_db_name}** (`{active_db_path}`)")
+
+        del_mode = st.radio(
+            "Delete by",
+            ["Directory prefix", "Single file path", "Paste list of paths"],
+            horizontal=True,
+            key="del_mode",
+        )
+
+        if del_mode == "Directory prefix":
+            prefix = st.text_input(
+                "Directory prefix",
+                placeholder="/path/to/old_photos/",
+                help="All indexed images whose path starts with this prefix will be removed.",
+                key="del_prefix",
+            )
+            dry_run = st.checkbox("Dry run (count matches without deleting)", key="del_dry")
+            if st.button("Delete by prefix", type="primary", key="del_prefix_btn"):
+                if not prefix:
+                    st.error("Enter a prefix.")
+                else:
+                    try:
+                        del_engine = SimilarityEngine(db_path=active_db_path)
+                        if dry_run:
+                            tbl = del_engine.db.open_table(DEFAULT_TABLE_NAME)
+                            arrow_tbl = tbl.to_arrow(columns=["id"])
+                            ids = arrow_tbl.column("id").to_pylist()
+                            matches = sum(1 for i in ids if i.startswith(prefix))
+                            st.info(f"Dry run: **{matches}** image(s) would be deleted.")
+                        else:
+                            result = del_engine.delete_by_prefix(prefix)
+                            st.success(f"Deleted **{result['deleted']}** image(s) with prefix `{prefix}`.")
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+
+        elif del_mode == "Single file path":
+            file_path = st.text_input(
+                "Exact file path",
+                placeholder="/path/to/image.jpg",
+                key="del_single_path",
+            )
+            if st.button("Delete image", type="primary", key="del_single_btn"):
+                if not file_path:
+                    st.error("Enter a file path.")
+                else:
+                    try:
+                        del_engine = SimilarityEngine(db_path=active_db_path)
+                        result = del_engine.delete([file_path])
+                        if result["deleted"]:
+                            st.success(f"Deleted **1** image from the index.")
+                        else:
+                            st.warning("Image not found in the index (may not have been ingested).")
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+
+        elif del_mode == "Paste list of paths":
+            paths_text = st.text_area(
+                "Paths (one per line)",
+                placeholder="/path/to/image1.jpg\n/path/to/image2.png",
+                height=200,
+                key="del_paths_text",
+            )
+            if st.button("Delete listed images", type="primary", key="del_list_btn"):
+                paths = [p.strip() for p in paths_text.splitlines() if p.strip()]
+                if not paths:
+                    st.error("Enter at least one path.")
+                else:
+                    try:
+                        del_engine = SimilarityEngine(db_path=active_db_path)
+                        result = del_engine.delete(paths)
+                        st.success(f"Deleted **{result['deleted']}** of {len(paths)} submitted path(s).")
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
 
 
 def _show_db_preview(engine, label="Database Preview", n=8):
@@ -560,7 +645,7 @@ def render_search_page(engine, top_k):
                     cols = st.columns(4)
                     for idx, (path, score) in enumerate(results):
                         col = cols[idx % 4]
-                        
+
                         # Show image
                         with col:
                             # Verify path exists
@@ -570,7 +655,65 @@ def render_search_page(engine, top_k):
                                 st.caption(f"**{score:.4f}**\n`{Path(path).name}`")
                             else:
                                 st.error(f"File not found: {path}")
-                                
+
+                    # --- Export results ---
+                    st.divider()
+                    with st.expander("Export Results", expanded=False):
+                        import io as _io
+                        import csv as _csv
+                        import shutil as _shutil
+
+                        col_a, col_b = st.columns(2)
+
+                        # CSV download
+                        with col_a:
+                            csv_buf = _io.StringIO()
+                            writer = _csv.writer(csv_buf)
+                            writer.writerow(["path", "score"])
+                            writer.writerows(results)
+                            st.download_button(
+                                label="Download CSV",
+                                data=csv_buf.getvalue(),
+                                file_name="search_results.csv",
+                                mime="text/csv",
+                                use_container_width=True,
+                            )
+
+                        # JSON download
+                        with col_b:
+                            json_data = json.dumps(
+                                [{"path": p, "score": s} for p, s in results], indent=2
+                            )
+                            st.download_button(
+                                label="Download JSON",
+                                data=json_data,
+                                file_name="search_results.json",
+                                mime="application/json",
+                                use_container_width=True,
+                            )
+
+                        # Copy images to a local directory
+                        st.markdown("**Copy images to a local folder:**")
+                        copy_dest = st.text_input(
+                            "Destination directory",
+                            placeholder="/path/to/output/",
+                            key="export_copy_dest",
+                        )
+                        if st.button("Copy images", key="export_copy_btn"):
+                            if not copy_dest:
+                                st.error("Enter a destination directory.")
+                            else:
+                                try:
+                                    os.makedirs(copy_dest, exist_ok=True)
+                                    copied = 0
+                                    for p, _ in results:
+                                        if os.path.exists(p):
+                                            _shutil.copy2(p, os.path.join(copy_dest, Path(p).name))
+                                            copied += 1
+                                    st.success(f"Copied {copied} image(s) to `{copy_dest}`.")
+                                except Exception as copy_err:
+                                    st.error(f"Copy failed: {copy_err}")
+
             except Exception as e:
                 st.error(f"Search failed: {str(e)}")
                 

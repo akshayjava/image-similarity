@@ -12,9 +12,13 @@ Commands:
 """
 
 import argparse
+import csv
 import json
 import logging
+import os
+import shutil
 import sys
+from pathlib import Path
 
 from similarity_engine import SimilarityEngine
 
@@ -34,6 +38,33 @@ def cmd_search(args):
     engine = SimilarityEngine(db_path=args.db_path)
     results = engine.search(query=args.query, top_k=args.top_k, where=args.filter)
 
+    # --- Export: JSON file ---
+    if args.export_json:
+        data = [{"path": p, "score": s} for p, s in results]
+        with open(args.export_json, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"Results exported to {args.export_json}")
+
+    # --- Export: CSV file ---
+    if args.export_csv:
+        with open(args.export_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["path", "score"])
+            writer.writerows(results)
+        print(f"Results exported to {args.export_csv}")
+
+    # --- Export: copy images to output directory ---
+    if args.copy_to:
+        os.makedirs(args.copy_to, exist_ok=True)
+        copied = 0
+        for path, _ in results:
+            if os.path.exists(path):
+                dest = os.path.join(args.copy_to, Path(path).name)
+                shutil.copy2(path, dest)
+                copied += 1
+        print(f"Copied {copied} image(s) to {args.copy_to}")
+
+    # --- Console output ---
     if args.json:
         print(json.dumps(
             [{"id": r[0], "distance": r[1]} for r in results], indent=2,
@@ -43,6 +74,26 @@ def cmd_search(args):
         for rank, (item_id, score) in enumerate(results, 1):
             print(f"  {rank}. {item_id}  (distance: {score:.6f})")
         print()
+
+
+def cmd_delete(args):
+    engine = SimilarityEngine(db_path=args.db_path)
+
+    if args.prefix:
+        print(f"Deleting all images with prefix: {args.prefix}")
+        result = engine.delete_by_prefix(args.prefix)
+    elif args.path:
+        result = engine.delete([args.path])
+    elif args.paths_file:
+        with open(args.paths_file) as f:
+            paths = [line.strip() for line in f if line.strip()]
+        print(f"Deleting {len(paths)} image(s) from paths file...")
+        result = engine.delete(paths)
+    else:
+        print("Error: provide --prefix, --path, or --paths-file", file=sys.stderr)
+        sys.exit(1)
+
+    print(json.dumps(result, indent=2))
 
 
 def cmd_create_index(args):
@@ -208,7 +259,38 @@ def main():
             "Example: \"width > 1920 AND file_size < 5000000\""
         ),
     )
+    p_search.add_argument(
+        "--export-json", default=None, metavar="FILE",
+        help="Export results to a JSON file (list of {path, score} objects)",
+    )
+    p_search.add_argument(
+        "--export-csv", default=None, metavar="FILE",
+        help="Export results to a CSV file (columns: path, score)",
+    )
+    p_search.add_argument(
+        "--copy-to", default=None, metavar="DIR",
+        help="Copy result images into DIR",
+    )
     p_search.set_defaults(func=cmd_search)
+
+    # --- delete ---
+    p_del = subparsers.add_parser(
+        "delete", help="Remove images from the vector store"
+    )
+    del_group = p_del.add_mutually_exclusive_group(required=True)
+    del_group.add_argument(
+        "--prefix", metavar="DIR",
+        help="Delete all images whose path starts with this prefix (e.g. /data/old/)",
+    )
+    del_group.add_argument(
+        "--path", metavar="FILE",
+        help="Delete a single image by its exact file path",
+    )
+    del_group.add_argument(
+        "--paths-file", metavar="FILE",
+        help="Delete all images listed in FILE (one absolute path per line)",
+    )
+    p_del.set_defaults(func=cmd_delete)
 
     # --- create-index ---
     p_index = subparsers.add_parser("create-index", help="Build IVF-PQ index")
